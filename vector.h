@@ -42,6 +42,8 @@
  \
 	type typename##_pop(typename* vec); \
  \
+ 	type typename##_top(typename* vec); \
+ \
 	void typename##_clear(typename* vec);  \
  \
 
@@ -127,6 +129,10 @@
  \
 	type typename##_pop(typename* vec){ \
 		return vec->data[--vec->size]; \
+	} \
+ \
+ 	type typename##_top(typename* vec){ \
+		return vec->data[vec->size-1]; \
 	} \
  \
 	void typename##_clear(typename* vec){  \
