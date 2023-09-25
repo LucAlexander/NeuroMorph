@@ -98,7 +98,7 @@ uint8_t hash_s(const char* key, uint32_t capacity);
 		return it; \
 	} \
 	\
-	typename##_result typename##_iteratorNext(typename##_iterator* it){ \
+	typename##_result typename##_iterator_next(typename##_iterator* it){ \
 		typename##TSHM_NODE* temp = it->current; \
 		if (!temp||it->index==-1){ \
 			typename##_result res = {.error = 1}; \

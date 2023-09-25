@@ -1,6 +1,6 @@
 from setuptools import setup, Extension
 
-module = Extension('neuromorph',sources=['NeuroMorph.c'])
+module = Extension('neuromorph',sources=['NeuroMorph.c', 'hashmap.c'])
 
 setup(
     name="NeuroMorph",
