@@ -1,7 +1,7 @@
 #include <Python.h>
 #include <stddef.h>
 #include <stdlib.h>
-
+#include <math.h>
 #include <stdio.h>
 
 #include "NeuroMorph.h"
@@ -60,7 +60,7 @@ neuromorph_node* neuromorph_layer_init(size_t buffer_size, void (*activation)(fl
 	return node;
 }
 
-neuromorph_node* neuromorph_output_init(size_t buffer_size, void (*activation)(float* const, const size_t* const), void (*loss)(float* const, const size_t* const)){
+neuromorph_node* neuromorph_output_init(size_t buffer_size, void (*activation)(float* const, const size_t* const), float (*loss)(float* const, const float* const, const float* const, const size_t* const)){
 	neuromorph_node* node = neuromorph_layer_init(buffer_size, activation);
 	node->loss_function = loss;
 	node->type = OUTPUT_NODE;
@@ -683,14 +683,142 @@ neuromorph_node* neuromorph_build_branch(neuromorph_ast* ast, ast_node_id node_i
 	return initial;
 }
 
+//TODO vectorize everything!!!!!
+//TODO apparently the overhead from dereferencing is larger than I realized, might be best to keep scalar arguments as copies so that they can be stuffed in a register
 void convergence_multiplicative(const float* const path, float* const buffer, const size_t* const buffer_size){}
 void convergence_additive(const float* const path, float* const buffer, const size_t* const buffer_size){}
 
-void loss_mse(float* const buffer, const size_t* const size){}
+float loss_mse(float* const buffer, const float* const result, const float* const expected, const size_t* const size){
+	float sum = 0;
+	for (size_t i = 0;i<*size;++i){
+		float loss = expected[i]-result[i];
+		buffer[i] = loss;
+		sum += loss*loss;
+	}
+	return (sum)/(*size);
+}
 
-void activation_sigmoid(float* const buffer, const size_t* const size){}
-void activation_relu(float* const buffer, const size_t* const size){}
-void activation_tanh(float* const buffer, const size_t* const size){}
+float loss_mae(float* const buffer, const float* const result, const float* const expected, const size_t* const size){
+	float sum = 0;
+	for (size_t i = 0;i<*size;++i){
+		float loss = expected[i]-result[i];
+		buffer[i] = loss;
+		sum += abs(loss);
+	}
+	return sum/(*size);
+}
+
+float loss_mape(float* const buffer, const float* const result, const float* const expected, const size_t* const size){
+	float sum = 0;
+	for (size_t i = 0;i<*size;++i){
+		float expect = expected[i];
+		float loss = expect-result[i];
+		buffer[i] = loss;
+		sum += abs(loss/expect);
+	}
+	return sum/(*size);
+}
+
+float loss_huber(float* const buffer, const float* const result, const float* const expected, const size_t* const size){
+	//TODO unfortunately not possible with current compiler, will need more compelx syntax logic for describing activation functions, allowing additional parameters
+	return 1;
+}
+
+float loss_cross_entropy(float* const buffer, const float* const result, const float* const expected, const size_t* const size){
+	float sum = 0;
+	for (size_t i = 0;i<*size;++i){
+		float expect = expected[i];
+		float res = result[i];
+		buffer[i] = expect-res;
+		sum += expect*log(res);
+	}
+	return -sum;
+}
+
+float loss_hinge(float* const buffer, const float* const result, const float* const expected, const size_t* const size){
+	float sum = 0;
+	for (size_t i = 0;i<*size;++i){
+		float expect = expected[i];
+		float res = result[i];
+		buffer[i] = expect-res;
+		sum += fmax(0,1-(expect*res));
+	}
+	return sum;
+}
+
+void activation_sigmoid(float* const buffer, const size_t* const size){
+	for (size_t i = 0;i<*size;++i){
+		buffer[i] = 1/(1+pow(EULER, -buffer[i]));
+	}
+}
+
+void activation_relu(float* const buffer, const size_t* const size){
+	for (size_t i = 0;i<*size;++i){
+		buffer[i] = fmax(0,buffer[i]);
+	}
+}
+
+void activation_tanh(float* const buffer, const size_t* const size){
+	for (size_t i = 0;i<*size;++i){
+		buffer[i] = tanh(buffer[i]);
+	}
+}
+
+void activation_binary_step(float* const buffer, const size_t* const size){
+	for (size_t i = 0;i<*size;++i){
+		buffer[i] = buffer[i] >= 0;
+	}
+}
+
+void activation_linear(float* const buffer, const size_t* const size){
+	return;
+}
+
+void activation_relu_leaky(float* const buffer, const size_t* const size){
+	float x;
+	for (size_t i = 0;i<*size;++i){
+		x = buffer[i];
+		buffer[i] = fmax(0.1*x,x);
+	}
+}
+
+void activation_relu_parametric(float* const buffer, const size_t* size){
+	//TODO unfortunately not possible with current compiler, will need more compelx syntax logic for describing activation functions, allowing additional parameters
+}
+
+void activation_elu(float* const buffer, const size_t* size){
+	//TODO unfortunately not possible with current compiler, will need more compelx syntax logic for describing activation functions, allowing additional parameters
+}
+
+void activation_softmax(float* const buffer, const size_t* size){
+	float denom = 0;
+	for (size_t i = 0;i<*size;++i){
+		denom += pow(EULER, buffer[i]);
+	}
+	for (size_t i = 0;i<*size;++i){
+		buffer[i] = pow(EULER, buffer[i])/denom;
+	}
+}
+
+void activation_swish(float* const buffer, const size_t* size){
+	float x;
+	for (size_t i = 0;i<*size;++i){
+		x = buffer[i];
+		buffer[i] = x/(1+pow(EULER,-x));
+	}
+}
+
+void activation_gelu(float* const buffer, const size_t* size){
+	float x;
+	for (size_t i = 0;i<*size;++i){
+		x = buffer[i];
+		buffer[i] = 0.5*x*(1+tanh(sqrt(2/PI)*(x+(GELU_C*pow(x,3)))));
+	}
+}
+
+void activation_selu(float* const buffer, const size_t* size){
+	//TODO unfortunately not possible with current compiler, will need more compelx syntax logic for describing activation functions, allowing additional parameters
+}
 
 static PyObject* helloworld(PyObject* self, PyObject* args){
 	neuromorph* model = neuromorph_compile("(input, 64, sigmoid)[divman,(branchyboi, 128, relu)(bb,256,relu){converge2, otherman, additive}(alex, 768, tanh)|(otherman,48,sigmoid)]{convergeman, alex, multiplicative}(output, 12, sigmoid, mse)");
