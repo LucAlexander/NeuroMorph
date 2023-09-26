@@ -143,6 +143,8 @@ neuromorph_node* neuromorph_build_branch(neuromorph_ast* ast, ast_node_id node_i
 
 void convergence_multiplicative(const float* const path, float* const buffer, const size_t* const buffer_size);
 void convergence_additive(const float* const path, float* const buffer, const size_t* const buffer_size);
+void convergennce_average(const float* const path, float* const buffer, const size_t* const buffer_size);
+//TODO concatenation, attention, weight, billinear matrix?
 
 float loss_mse(float* const buffer, const float* const result, const float* const expected, const size_t* const size);
 float loss_mae(float* const buffer, const float* const result, const float* const expected, const size_t* const size);
@@ -163,7 +165,5 @@ void activation_softmax(float* const buffer, const size_t* size);
 void activation_swish(float* const buffer, const size_t* size);
 void activation_gelu(float* const buffer, const size_t* size);
 void activation_selu(float* const buffer, const size_t* size);
-
-
 
 #endif

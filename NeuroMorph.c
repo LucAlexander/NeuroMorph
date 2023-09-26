@@ -685,8 +685,23 @@ neuromorph_node* neuromorph_build_branch(neuromorph_ast* ast, ast_node_id node_i
 
 //TODO vectorize everything!!!!!
 //TODO apparently the overhead from dereferencing is larger than I realized, might be best to keep scalar arguments as copies so that they can be stuffed in a register
-void convergence_multiplicative(const float* const path, float* const buffer, const size_t* const buffer_size){}
-void convergence_additive(const float* const path, float* const buffer, const size_t* const buffer_size){}
+void convergence_multiplicative(const float* const path, float* const buffer, const size_t* const buffer_size){
+	for (size_t i = 0;i<*buffer_size;++i){
+		buffer[i] *= path[i];
+	}
+}
+
+void convergence_additive(const float* const path, float* const buffer, const size_t* const buffer_size){
+	for (size_t i = 0;i<*buffer_size;++i){
+		buffer[i] += path[i];
+	}
+}
+
+void convergennce_average(const float* const path, float* const buffer, const size_t* const buffer_size){
+	for (size_t i = 0;i<*buffer_size;++i){
+		buffer[i] = (buffer[i]+path[i])/2;
+	}
+}
 
 float loss_mse(float* const buffer, const float* const result, const float* const expected, const size_t* const size){
 	float sum = 0;
