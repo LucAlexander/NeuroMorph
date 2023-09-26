@@ -16,6 +16,10 @@ typedef enum NEUROMORPH_NODE_TYPE{
 	OUTPUT_NODE
 }NEUROMORPH_NODE_TYPE;
 
+#define ACTIVATION_TYPE void (*)(float* const, const size_t* const)
+#define LOSS_TYPE float (*)(float* const, const float* const, const float* const, const size_t* const)
+#define GENERIC_FUNCTION_TYPE void* (*)(void*)
+
 typedef struct neuromorph_node{
 	struct neuromorph_node* next;
 	struct neuromorph_node* prev;
@@ -34,8 +38,10 @@ typedef struct neuromorph_node{
 	float* bias_buffer;
 	size_t bias_buffer_size;
 	void (*activation_function)(float* const buffer, const size_t* const size);
+	float activation_parameter;
 	// Used by specialized output node for loss function
 	float (*loss_function)(float* const buffer, const float* const result, const float* const expected, const size_t* const size);
+	float loss_parameter;
 	// Used by information flow nodes to keep track of the previuos layer, convergence,  or input buffer
 	const float* previous_neuron_buffer;
 	const size_t* previous_buffer_size;
@@ -52,8 +58,8 @@ typedef struct neuromorph_node{
 neuromorph_node* neuromorph_input_init(size_t input_size);
 neuromorph_node* neuromorph_divergent_init();
 neuromorph_node* neuromorph_convergent_init(void (*convergence)(const float* const, float* const, const size_t* const));
-neuromorph_node* neuromorph_layer_init(size_t buffer_size, void (*activation)(float* const, const size_t* const));
-neuromorph_node* neuromorph_output_init(size_t buffer_size, void (*activation)(float* const, const size_t* const), float (*loss)(float* const, const float* const, const float* const, const size_t* const));
+neuromorph_node* neuromorph_layer_init(size_t buffer_size, void (*activation)(float* const, const size_t* const), float parameter);
+neuromorph_node* neuromorph_output_init(size_t buffer_size, void (*activation)(float* const, const size_t* const), float activation_parameter, float (*loss)(float* const, const float* const, const float* const, const size_t* const), float loss_parameter);
 
 void neuromorph_node_free(neuromorph_node*);
 
@@ -74,6 +80,9 @@ typedef struct neuromorph_layer_args{
 	size_t layer_size;
 	void (*activation_function)(float* const, const size_t* const);
 	float (*loss_function)(float* const, const float* const, const float* const, const size_t* const);
+	float activation_parameter;
+	float loss_parameter;
+	uint8_t input;
 }neuromorph_layer_args;
 
 typedef struct neuromorph_divergence_args{
@@ -119,7 +128,30 @@ void adjacency_map_free_internal(adjacency_map* adjacency);
 
 #define NODE_NAME_TOKEN_MAX 64
 
+typedef enum PARAMETRIC_FUNCTION_TYPE{
+	PARAMETRIC_ACTIVATION,
+	PARAMETRIC_LOSS
+}PARAMETRIC_FUNCTION_TYPE;
+
+typedef union parametric_function_data{
+	void (*activation)(float* const buffer, const size_t* const size);
+	float (*loss)(float* const buffer, const float* const result, const float* const expected, const size_t* const buffer_size);
+}parametric_function_data;
+
+typedef struct parametric_function{
+	PARAMETRIC_FUNCTION_TYPE type;
+	parametric_function_data function;
+	float parameter;
+}parametric_function;
+
+typedef struct function_record{
+	const char* name;
+	PARAMETRIC_FUNCTION_TYPE type;
+	void* (*function)(void*);
+}function_record;
+
 neuromorph* neuromorph_compile(const char* const description);
+uint8_t parse_parametric_function(parametric_function* const func, const char** c);
 void ast_converge_branches(neuromorph_ast* const ast);
 uint8_t neuromorph_compile_check_legal(neuromorph_ast* const ast, const ast_node_id* const root);
 uint8_t neuromorph_layer_check_legal(neuromorph_layer_args layer, const ast_node_id* const next, ast_node_id* const output, ast_node_id* const node_id);
@@ -127,10 +159,12 @@ uint8_t neuromorph_divergence_check_legal(neuromorph_divergence_args divergence,
 uint8_t neuromorph_convergence_check_legal(neuromorph_convergence_args convergence, neuromorph_ast* const ast);
 ast_node_id name_to_id(const char* name);
 uint8_t neuromorph_ast_set_next_id(neuromorph_ast* ast, ast_node_id id, ast_node_id next);
+
 uint8_t neuromorph_layer_arg_parse(neuromorph_ast_node* node, uint16_t arg_i, const char* const arg);
+uint8_t neuromorph_pass_parametric_function(neuromorph_ast_node* const node, uint16_t arg_i, const parametric_function* const param);
 uint8_t neuromorph_convergence_arg_parse(neuromorph_ast_node* node, uint16_t arg_i, const char* const arg);
 uint8_t neuromorph_divergence_arg_parse(neuromorph_ast_node* node, uint16_t arg_t, ast_node_id id);
-uint8_t neuromorph_parse_segment(neuromorph_ast* ast, const char** c, char type, ast_node_id* const id, ast_node_id prev, uint8_t first);
+uint8_t neuromorph_parse_segment(neuromorph_ast* ast, const char** c, char type, ast_node_id* const id, ast_node_id prev, uint8_t first, uint8_t true_root);
 void neuromorph_ast_free_internal(neuromorph_ast* const ast);
 
 HASHMAP(graph_domain, ast_node_id, uintptr_t)
@@ -143,8 +177,10 @@ neuromorph_node* neuromorph_build_branch(neuromorph_ast* ast, ast_node_id node_i
 
 void convergence_multiplicative(const float* const path, float* const buffer, const size_t* const buffer_size);
 void convergence_additive(const float* const path, float* const buffer, const size_t* const buffer_size);
-void convergennce_average(const float* const path, float* const buffer, const size_t* const buffer_size);
+void convergence_average(const float* const path, float* const buffer, const size_t* const buffer_size);
 //TODO concatenation, attention, weight, billinear matrix?
+
+#define PARAMETRIC_FUNCTION_COUNT 18
 
 float loss_mse(float* const buffer, const float* const result, const float* const expected, const size_t* const size);
 float loss_mae(float* const buffer, const float* const result, const float* const expected, const size_t* const size);

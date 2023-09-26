@@ -32,7 +32,9 @@ neuromorph_node* neuromorph_divergent_init(){
 	node->bias_buffer = NULL;
 	node->bias_buffer_size = 0;
 	node->activation_function = NULL;
+	node->activation_parameter = 0;
 	node->loss_function = NULL;
+	node->loss_parameter = 0;
 	node->previous_neuron_buffer = NULL;
 	node->previous_buffer_size = NULL;
 	node->additional_branches = NULL;
@@ -51,18 +53,20 @@ neuromorph_node* neuromorph_convergent_init(void (*convergence)(const float* con
 	return node;
 }
 
-neuromorph_node* neuromorph_layer_init(size_t buffer_size, void (*activation)(float* const, const size_t* const)){
+neuromorph_node* neuromorph_layer_init(size_t buffer_size, void (*activation)(float* const, const size_t* const), float parameter){
 	neuromorph_node* node = neuromorph_input_init(buffer_size);
 	node->bias_buffer = malloc(sizeof(float)*buffer_size);
 	node->bias_buffer_size = buffer_size;
 	node->activation_function = activation;
+	node->activation_parameter = parameter;
 	node->type = LAYER_NODE;
 	return node;
 }
 
-neuromorph_node* neuromorph_output_init(size_t buffer_size, void (*activation)(float* const, const size_t* const), float (*loss)(float* const, const float* const, const float* const, const size_t* const)){
-	neuromorph_node* node = neuromorph_layer_init(buffer_size, activation);
+neuromorph_node* neuromorph_output_init(size_t buffer_size, void (*activation)(float* const, const size_t* const), float activation_parameter, float (*loss)(float* const, const float* const, const float* const, const size_t* const), float loss_parameter){
+	neuromorph_node* node = neuromorph_layer_init(buffer_size, activation, activation_parameter);
 	node->loss_function = loss;
+	node->loss_parameter = loss_parameter;
 	node->type = OUTPUT_NODE;
 	return node;
 }
@@ -219,7 +223,7 @@ neuromorph* neuromorph_compile(const char* const description){
 	ast_node_id root = -1;
 	uint8_t first = 1;
 	while (*c != '\0'){
-		if (!neuromorph_parse_segment(&ast, &c, *c, &id, prev, first)){
+		if (!neuromorph_parse_segment(&ast, &c, *c, &id, prev, first, first)){
 			fprintf(stderr, "compile ended early\n");
 			neuromorph_ast_free_internal(&ast);
 			return NULL;
@@ -263,36 +267,16 @@ ast_node_id name_to_id(const char* arg){
 }
 
 uint8_t neuromorph_layer_arg_parse(neuromorph_ast_node* node, uint16_t arg_i, const char* const arg){
-	switch(arg_i){
-	case 0:
-		node->data.layer.layer_size = atoi(arg);
-		return 1;
-	case 1:
-		if (!strcmp(arg, "sigmoid")){
-			node->data.layer.activation_function = activation_sigmoid;
-		}
-		else if (!strcmp(arg, "relu")){
-			node->data.layer.activation_function = activation_relu;
-		}
-		else if (!strcmp(arg, "tanh")){
-			node->data.layer.activation_function = activation_tanh;
-		}
-		else{
-			fprintf(stderr, "unknown activation function %s\n", arg);
-			return 0;
-		}
-		return 1;
-	case 2:
-		if (!strcmp(arg, "mse")){
-			node->data.layer.loss_function = loss_mse;
-		}
-		else{
-			fprintf(stderr, "unknnown loss function %s\n", arg);
-			return 0;
-		}
-		return 1;
+	if (arg_i != 0){
+		fprintf(stderr, "additional non function argument passed to layer\n");
+		return 0;
 	}
-	return 0;
+	node->data.layer.layer_size = atoi(arg);
+	if (node->data.layer.layer_size == 0){
+		fprintf(stderr, "%s not a valid layer size\n", arg);
+		return 0;
+	}
+	return 1;
 }
 
 uint8_t neuromorph_convergence_arg_parse(neuromorph_ast_node* node, uint16_t arg_i, const char* const arg){
@@ -306,6 +290,9 @@ uint8_t neuromorph_convergence_arg_parse(neuromorph_ast_node* node, uint16_t arg
 		}
 		else if (!strcmp(arg, "additive")){
 			node->data.convergence.convergence_function = convergence_additive;
+		}
+		else if (!strcmp(arg, "average")){
+			node->data.convergence.convergence_function = convergence_average;
 		}
 		else{
 			fprintf(stderr, "unknown convergence function %s\n", arg);
@@ -336,21 +323,124 @@ uint8_t neuromorph_ast_set_next_id(neuromorph_ast* ast, ast_node_id id, ast_node
 	return 1;
 }
 
-uint8_t neuromorph_parse_segment(neuromorph_ast* ast, const char** c, char type, ast_node_id* const top_level_id, ast_node_id prev, uint8_t first){
+uint8_t evaluate_parametric_function_name(parametric_function* const func, const char* const name){
+	function_record function_list[] = {
+		{"sigmoid", PARAMETRIC_ACTIVATION, (GENERIC_FUNCTION_TYPE)activation_sigmoid},
+		{"relu", PARAMETRIC_ACTIVATION, (GENERIC_FUNCTION_TYPE)activation_relu},
+		{"relu_leaky", PARAMETRIC_ACTIVATION, (GENERIC_FUNCTION_TYPE)activation_relu_leaky},
+		{"tanh", PARAMETRIC_ACTIVATION, (GENERIC_FUNCTION_TYPE)activation_tanh},
+		{"softmax", PARAMETRIC_ACTIVATION, (GENERIC_FUNCTION_TYPE)activation_softmax},
+		{"elu", PARAMETRIC_ACTIVATION, (GENERIC_FUNCTION_TYPE)activation_elu},
+		{"gelu", PARAMETRIC_ACTIVATION, (GENERIC_FUNCTION_TYPE)activation_gelu},
+		{"swish", PARAMETRIC_ACTIVATION, (GENERIC_FUNCTION_TYPE)activation_swish},
+		{"relu_parametric", PARAMETRIC_ACTIVATION, (GENERIC_FUNCTION_TYPE)activation_relu_parametric},
+		{"selu", PARAMETRIC_ACTIVATION, (GENERIC_FUNCTION_TYPE)activation_selu},
+		{"linear", PARAMETRIC_ACTIVATION, (GENERIC_FUNCTION_TYPE)activation_linear},
+		{"binary_step", PARAMETRIC_ACTIVATION, (GENERIC_FUNCTION_TYPE)activation_binary_step},
+		{"mse", PARAMETRIC_LOSS, (GENERIC_FUNCTION_TYPE)loss_mse},
+		{"mae", PARAMETRIC_LOSS, (GENERIC_FUNCTION_TYPE)loss_mae},
+		{"mape", PARAMETRIC_LOSS, (GENERIC_FUNCTION_TYPE)loss_mape},
+		{"huber", PARAMETRIC_LOSS, (GENERIC_FUNCTION_TYPE)loss_huber},
+		{"hinge", PARAMETRIC_LOSS, (GENERIC_FUNCTION_TYPE)loss_hinge},
+		{"cross_entropy", PARAMETRIC_LOSS, (GENERIC_FUNCTION_TYPE)loss_cross_entropy}
+	};
+	for (size_t i = 0;i<PARAMETRIC_FUNCTION_COUNT;++i){
+		if (!strcmp(name, function_list[i].name)){
+			func->type = function_list[i].type;
+			if (func->type == PARAMETRIC_ACTIVATION){
+				func->function.activation = (ACTIVATION_TYPE)function_list[i].function;
+				return 1;
+			}
+			func->function.loss = (LOSS_TYPE)function_list[i].function;
+			return 1;
+		}
+	}
+	fprintf(stderr, "not a valid parametric function name\n");
+	return 0;
+}
+
+uint8_t parse_parametric_function(parametric_function* const func, const char** c){
+	char arg[NODE_NAME_TOKEN_MAX];
+	uint16_t index = 0;
+	uint8_t argument_set = 0;
+	for (++(*c);**c!='\0';++(*c)){
+		switch(**c){
+		case ' ':
+		case '\n':
+		case '\r':
+		case '\t':
+		case '\b':
+			break;
+		case ')':
+		case ']':
+		case '}':
+		case '|':
+		case '<':
+		case '[':
+		case '{':
+		case '(':
+			fprintf(stderr, "unexpected token in parametric function parse %c\n", **c);
+			return 0;
+		case '>':
+			arg[index] = '\0';
+			if (!argument_set){
+				if (!evaluate_parametric_function_name(func, arg)){
+					fprintf(stderr,"missing parametric function name, recieved only %s\n", arg);
+					return 0;
+				}
+			}
+			func->parameter = atof(arg);
+			return 1;
+		case ',':
+			arg[index] = '\0';
+			index = 0;
+			argument_set = 1;
+			if (!evaluate_parametric_function_name(func, arg)){
+				return 0;
+			}
+			break;
+		default:
+			if (index == NODE_NAME_TOKEN_MAX-1){
+				fprintf(stderr, "invalid parametric argument, token length exceeded\n");
+				return 0;
+			}
+			arg[index++] = **c;
+			break;
+		}
+	}
+	fprintf(stderr, "unexpected end of description during function parse\n");
+	return 0;
+}
+
+uint8_t neuromorph_pass_parametric_function(neuromorph_ast_node* const node, uint16_t arg_i, const parametric_function* const param){
+	if (param->type == PARAMETRIC_ACTIVATION){
+		node->data.layer.activation_function = (ACTIVATION_TYPE)param->function.activation;
+		node->data.layer.activation_parameter = param->parameter;
+		return 1;
+	}
+	if (param->type == PARAMETRIC_LOSS){
+		node->data.layer.loss_function = (LOSS_TYPE)param->function.loss;
+		node->data.layer.loss_parameter = param->parameter;
+		return 1;
+	}
+	fprintf(stderr, "parametric function passed in wrong argument position\n");
+	return 0;
+}
+
+uint8_t neuromorph_parse_segment(neuromorph_ast* ast, const char** c, char type, ast_node_id* const top_level_id, ast_node_id prev, uint8_t first, uint8_t true_root){
 	neuromorph_ast_node node;
 	uint8_t found_start = 0;
 	for (;!found_start;++(*c)){
-		if (**c=='\0'){
-			fprintf(stderr, "expression terminated early\n");
-			return 0;
-		}
-		switch(type){
+		switch(**c){
+		case '\0':
+			return 1;
 		case '(':
 			found_start = 1;
 			node.type = NEUROMORPH_LAYER_ARGS;
 			node.data.layer.layer_size = 0;
 			node.data.layer.activation_function = NULL;
 			node.data.layer.loss_function = NULL;
+			node.data.layer.input = true_root;
 			break;
 		case '{':
 			found_start = 1;
@@ -391,6 +481,8 @@ uint8_t neuromorph_parse_segment(neuromorph_ast* ast, const char** c, char type,
 	uint8_t branch_start = 1;
 	ast_node_id branch_start_id = -1;
 	ast_node_id sub_prev = id;
+	parametric_function param = {0, {NULL}, 0};
+	uint8_t function_arg = 0;
 	for ((*c)++;**c!='\0';++(*c)){
 		switch (**c){
 		case ' ':
@@ -399,11 +491,25 @@ uint8_t neuromorph_parse_segment(neuromorph_ast* ast, const char** c, char type,
 		case '\r':
 		case '\b':
 			break;
+		case '>':
+			fprintf(stderr, "unexpected token, no function to end\n");
+			return 0;
+		case '<':
+			if (node.type != NEUROMORPH_LAYER_ARGS){
+				fprintf(stderr, "parametric function passed in non layer\n");
+				return 0;
+			}
+			if (!parse_parametric_function(&param, c)){
+				fprintf(stderr, "invalid parametric activation function\n");
+				return 0;
+			}
+			function_arg = 1;
+			break;
 		case '(':
 		case '{':
 		case '[':
 			ast_node_id temp_id;
-			if (!neuromorph_parse_segment(ast, c, **c, &temp_id, sub_prev, branch_start)){
+			if (!neuromorph_parse_segment(ast, c, **c, &temp_id, sub_prev, branch_start, 0)){
 				return 0;
 			}
 			--(*c);
@@ -418,7 +524,14 @@ uint8_t neuromorph_parse_segment(neuromorph_ast* ast, const char** c, char type,
 				fprintf(stderr, "node terminated with unexpected token %c\n", **c);
 				return 0;
 			}
-			if (index != 0){
+			if (function_arg){
+				if (!neuromorph_pass_parametric_function(&node, arg_i++, &param)){
+					fprintf(stderr, "parametric activation passed in incorrect argument sloot\n");
+					return 0;
+				}
+				function_arg = 0;
+			}
+			else if (index != 0){
 				arg[index] = '\0';
 				if (!neuromorph_layer_arg_parse(&node, arg_i++, arg)){
 					fprintf(stderr, "argument error\n");
@@ -461,6 +574,14 @@ uint8_t neuromorph_parse_segment(neuromorph_ast* ast, const char** c, char type,
 			arg[index] = '\0';
 			index = 0;
 			if (node.type == NEUROMORPH_LAYER_ARGS){
+				if (function_arg){
+					if (!neuromorph_pass_parametric_function(&node, arg_i++, &param)){
+						fprintf(stderr, "parametric function passed in incorrect argument slot\n");
+						return 0;
+					}
+					function_arg = 0;
+					break;
+				}
 				if (!neuromorph_layer_arg_parse(&node, arg_i++, arg)){
 					fprintf(stderr, "argument error\n");
 					return 0;
@@ -518,7 +639,7 @@ uint8_t neuromorph_layer_check_legal(neuromorph_layer_args layer, const ast_node
 		fprintf(stderr, "layer size not given\n");
 		return 0;
 	}
-	if (layer.activation_function == NULL){
+	if (layer.activation_function == NULL && !layer.input){
 		fprintf(stderr, "activation function not provided\n");
 		return 0;
 	}
@@ -616,7 +737,7 @@ neuromorph_node* neuromorph_build_branch(neuromorph_ast* ast, ast_node_id node_i
 		case NEUROMORPH_LAYER_ARGS:
 			if (first){
 				if (branch){
-					current_node = neuromorph_layer_init(ast_node->data.layer.layer_size, ast_node->data.layer.activation_function);
+					current_node = neuromorph_layer_init(ast_node->data.layer.layer_size, ast_node->data.layer.activation_function, ast_node->data.layer.activation_parameter);
 				}
 				else{
 					current_node = neuromorph_input_init(ast_node->data.layer.layer_size);
@@ -631,10 +752,10 @@ neuromorph_node* neuromorph_build_branch(neuromorph_ast* ast, ast_node_id node_i
 				node = link;
 			}
 			if (ast_node->next == -1){
-				current_node = neuromorph_output_init(ast_node->data.layer.layer_size, ast_node->data.layer.activation_function, ast_node->data.layer.loss_function);
+				current_node = neuromorph_output_init(ast_node->data.layer.layer_size, ast_node->data.layer.activation_function, ast_node->data.layer.activation_parameter, ast_node->data.layer.loss_function, ast_node->data.layer.loss_parameter);
 				break;
 			}
-			current_node = neuromorph_layer_init(ast_node->data.layer.layer_size, ast_node->data.layer.activation_function);
+			current_node = neuromorph_layer_init(ast_node->data.layer.layer_size, ast_node->data.layer.activation_function, ast_node->data.layer.activation_parameter);
 			break;
 		case NEUROMORPH_CONVERGENCE_ARGS:
 			current_node = neuromorph_convergent_init(ast_node->data.convergence.convergence_function);
@@ -697,7 +818,7 @@ void convergence_additive(const float* const path, float* const buffer, const si
 	}
 }
 
-void convergennce_average(const float* const path, float* const buffer, const size_t* const buffer_size){
+void convergence_average(const float* const path, float* const buffer, const size_t* const buffer_size){
 	for (size_t i = 0;i<*buffer_size;++i){
 		buffer[i] = (buffer[i]+path[i])/2;
 	}
@@ -858,12 +979,15 @@ static PyObject* helloworld(PyObject* self, PyObject* args){
 }
 
 static PyObject* say_hello(PyObject* self, PyObject* args){
-	const char* name;
-	if (!PyArg_ParseTuple(args, "s", &name)){
+	const char* description;
+	if (!PyArg_ParseTuple(args, "s", &description)){
 		return NULL;
 	}
+	neuromorph* model = neuromorph_compile(description);
+	neuromorph_build(model);
+	neuromorph_free(model);
 	char greeting[256];
-	snprintf(greeting, sizeof(greeting), "Hello, %s", name);
+	snprintf(greeting, sizeof(greeting), "compiled and built description:\n\n%s", description);
 	return Py_BuildValue("s", greeting);
 }
 
