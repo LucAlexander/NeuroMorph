@@ -53,7 +53,7 @@ neuromorph_node* neuromorph_convergent_init(void (*convergence)(const float* con
 	return node;
 }
 
-neuromorph_node* neuromorph_layer_init(size_t buffer_size, void (*activation)(float* const, const size_t* const), float parameter){
+neuromorph_node* neuromorph_layer_init(size_t buffer_size, void (*activation)(float* const, const size_t* const, float), float parameter){
 	neuromorph_node* node = neuromorph_input_init(buffer_size);
 	node->bias_buffer = malloc(sizeof(float)*buffer_size);
 	node->bias_buffer_size = buffer_size;
@@ -63,7 +63,7 @@ neuromorph_node* neuromorph_layer_init(size_t buffer_size, void (*activation)(fl
 	return node;
 }
 
-neuromorph_node* neuromorph_output_init(size_t buffer_size, void (*activation)(float* const, const size_t* const), float activation_parameter, float (*loss)(float* const, const float* const, const float* const, const size_t* const), float loss_parameter){
+neuromorph_node* neuromorph_output_init(size_t buffer_size, void (*activation)(float* const, const size_t* const, float), float activation_parameter, float (*loss)(float* const, const float* const, const float* const, const size_t* const, float), float loss_parameter){
 	neuromorph_node* node = neuromorph_layer_init(buffer_size, activation, activation_parameter);
 	node->loss_function = loss;
 	node->loss_parameter = loss_parameter;
@@ -824,7 +824,7 @@ void convergence_average(const float* const path, float* const buffer, const siz
 	}
 }
 
-float loss_mse(float* const buffer, const float* const result, const float* const expected, const size_t* const size){
+float loss_mse(float* const buffer, const float* const result, const float* const expected, const size_t* const size, float parameter){
 	float sum = 0;
 	for (size_t i = 0;i<*size;++i){
 		float loss = expected[i]-result[i];
@@ -834,7 +834,7 @@ float loss_mse(float* const buffer, const float* const result, const float* cons
 	return (sum)/(*size);
 }
 
-float loss_mae(float* const buffer, const float* const result, const float* const expected, const size_t* const size){
+float loss_mae(float* const buffer, const float* const result, const float* const expected, const size_t* const size, float parameter){
 	float sum = 0;
 	for (size_t i = 0;i<*size;++i){
 		float loss = expected[i]-result[i];
@@ -844,7 +844,7 @@ float loss_mae(float* const buffer, const float* const result, const float* cons
 	return sum/(*size);
 }
 
-float loss_mape(float* const buffer, const float* const result, const float* const expected, const size_t* const size){
+float loss_mape(float* const buffer, const float* const result, const float* const expected, const size_t* const size, float parameter){
 	float sum = 0;
 	for (size_t i = 0;i<*size;++i){
 		float expect = expected[i];
@@ -855,12 +855,41 @@ float loss_mape(float* const buffer, const float* const result, const float* con
 	return sum/(*size);
 }
 
-float loss_huber(float* const buffer, const float* const result, const float* const expected, const size_t* const size){
-	//TODO unfortunately not possible with current compiler, will need more compelx syntax logic for describing activation functions, allowing additional parameters
-	return 1;
+float loss_huber(float* const buffer, const float* const result, const float* const expected, const size_t* const size, float parameter){
+	float sum = 0;
+	float hpsq = parameter*parameter*0.5;
+	for (size_t i = 0;i<*size;++i){
+		float expect = expected[i];
+		float res = result[i];
+		float x = expect-res;
+		buffer[i] = x;
+		if (abs(x) <= parameter){
+			sum += x*x*0.5;
+			continue;
+		}
+		sum += (parameter*abs(x))-hpsq;
+	}
+	return sum;
 }
 
-float loss_cross_entropy(float* const buffer, const float* const result, const float* const expected, const size_t* const size){
+float loss_huber_modified(float* const buffer, const float* const result, const float* const expected, const size_t* const size, float parameter){
+	float sum = 0;
+	for (size_t i = 0;i<*size;++i){
+		float expect = expected[i];
+		float res = result[i];
+		float x = expect-res;
+		buffer[i] = x;
+		x = expect*res;
+		if (x > -1){
+			sum += pow(fmax(0, 1-x),2);
+			continue;
+		}
+		sum -= 4*x;
+	}
+	return sum;
+}
+
+float loss_cross_entropy(float* const buffer, const float* const result, const float* const expected, const size_t* const size, float parameter){
 	float sum = 0;
 	for (size_t i = 0;i<*size;++i){
 		float expect = expected[i];
@@ -871,7 +900,7 @@ float loss_cross_entropy(float* const buffer, const float* const result, const f
 	return -sum;
 }
 
-float loss_hinge(float* const buffer, const float* const result, const float* const expected, const size_t* const size){
+float loss_hinge(float* const buffer, const float* const result, const float* const expected, const size_t* const size, float parameter){
 	float sum = 0;
 	for (size_t i = 0;i<*size;++i){
 		float expect = expected[i];
@@ -882,35 +911,35 @@ float loss_hinge(float* const buffer, const float* const result, const float* co
 	return sum;
 }
 
-void activation_sigmoid(float* const buffer, const size_t* const size){
+void activation_sigmoid(float* const buffer, const size_t* const size, float parameter){
 	for (size_t i = 0;i<*size;++i){
 		buffer[i] = 1/(1+pow(EULER, -buffer[i]));
 	}
 }
 
-void activation_relu(float* const buffer, const size_t* const size){
+void activation_relu(float* const buffer, const size_t* const size, float parameter){
 	for (size_t i = 0;i<*size;++i){
 		buffer[i] = fmax(0,buffer[i]);
 	}
 }
 
-void activation_tanh(float* const buffer, const size_t* const size){
+void activation_tanh(float* const buffer, const size_t* const size, float parameter){
 	for (size_t i = 0;i<*size;++i){
 		buffer[i] = tanh(buffer[i]);
 	}
 }
 
-void activation_binary_step(float* const buffer, const size_t* const size){
+void activation_binary_step(float* const buffer, const size_t* const size, float parameter){
 	for (size_t i = 0;i<*size;++i){
 		buffer[i] = buffer[i] >= 0;
 	}
 }
 
-void activation_linear(float* const buffer, const size_t* const size){
+void activation_linear(float* const buffer, const size_t* const size, float parameter){
 	return;
 }
 
-void activation_relu_leaky(float* const buffer, const size_t* const size){
+void activation_relu_leaky(float* const buffer, const size_t* const size, float parameter){
 	float x;
 	for (size_t i = 0;i<*size;++i){
 		x = buffer[i];
@@ -918,15 +947,25 @@ void activation_relu_leaky(float* const buffer, const size_t* const size){
 	}
 }
 
-void activation_relu_parametric(float* const buffer, const size_t* size){
-	//TODO unfortunately not possible with current compiler, will need more compelx syntax logic for describing activation functions, allowing additional parameters
+void activation_relu_parametric(float* const buffer, const size_t* size, float parameter){
+	float x;
+	for (size_t i = 0;i<*size;++i){
+		x = buffer[i];
+		buffer[i] = fmax(parameter*x, x);
+	}
 }
 
-void activation_elu(float* const buffer, const size_t* size){
-	//TODO unfortunately not possible with current compiler, will need more compelx syntax logic for describing activation functions, allowing additional parameters
+void activation_elu(float* const buffer, const size_t* size, float parameter){
+	float x;
+	for (size_t i = 0;i<*size;++i){
+		x = buffer[i];
+		if (x < 0){
+			buffer[i] = parameter*(pow(EULER, x)-1);
+		}
+	}
 }
 
-void activation_softmax(float* const buffer, const size_t* size){
+void activation_softmax(float* const buffer, const size_t* size, float parameter){
 	float denom = 0;
 	for (size_t i = 0;i<*size;++i){
 		denom += pow(EULER, buffer[i]);
@@ -936,7 +975,7 @@ void activation_softmax(float* const buffer, const size_t* size){
 	}
 }
 
-void activation_swish(float* const buffer, const size_t* size){
+void activation_swish(float* const buffer, const size_t* size, float parameter){
 	float x;
 	for (size_t i = 0;i<*size;++i){
 		x = buffer[i];
@@ -944,7 +983,7 @@ void activation_swish(float* const buffer, const size_t* size){
 	}
 }
 
-void activation_gelu(float* const buffer, const size_t* size){
+void activation_gelu(float* const buffer, const size_t* size, float parameter){
 	float x;
 	for (size_t i = 0;i<*size;++i){
 		x = buffer[i];
@@ -952,8 +991,8 @@ void activation_gelu(float* const buffer, const size_t* size){
 	}
 }
 
-void activation_selu(float* const buffer, const size_t* size){
-	//TODO unfortunately not possible with current compiler, will need more compelx syntax logic for describing activation functions, allowing additional parameters
+void activation_selu(float* const buffer, const size_t* size, float parameter){
+	//TODO unfortunately not possible with current compiler, will need more compelx syntax logic for describing activation functions, allowing multiple parameters
 }
 
 static PyObject* helloworld(PyObject* self, PyObject* args){

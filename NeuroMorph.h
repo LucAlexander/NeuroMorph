@@ -16,8 +16,8 @@ typedef enum NEUROMORPH_NODE_TYPE{
 	OUTPUT_NODE
 }NEUROMORPH_NODE_TYPE;
 
-#define ACTIVATION_TYPE void (*)(float* const, const size_t* const)
-#define LOSS_TYPE float (*)(float* const, const float* const, const float* const, const size_t* const)
+#define ACTIVATION_TYPE void (*)(float* const, const size_t* const, float)
+#define LOSS_TYPE float (*)(float* const, const float* const, const float* const, const size_t* const, float)
 #define GENERIC_FUNCTION_TYPE void* (*)(void*)
 
 typedef struct neuromorph_node{
@@ -37,10 +37,10 @@ typedef struct neuromorph_node{
 	size_t weight_buffer_size;
 	float* bias_buffer;
 	size_t bias_buffer_size;
-	void (*activation_function)(float* const buffer, const size_t* const size);
+	void (*activation_function)(float* const buffer, const size_t* const size, float parameter);
 	float activation_parameter;
 	// Used by specialized output node for loss function
-	float (*loss_function)(float* const buffer, const float* const result, const float* const expected, const size_t* const size);
+	float (*loss_function)(float* const buffer, const float* const result, const float* const expected, const size_t* const size, float parameter);
 	float loss_parameter;
 	// Used by information flow nodes to keep track of the previuos layer, convergence,  or input buffer
 	const float* previous_neuron_buffer;
@@ -58,8 +58,8 @@ typedef struct neuromorph_node{
 neuromorph_node* neuromorph_input_init(size_t input_size);
 neuromorph_node* neuromorph_divergent_init();
 neuromorph_node* neuromorph_convergent_init(void (*convergence)(const float* const, float* const, const size_t* const));
-neuromorph_node* neuromorph_layer_init(size_t buffer_size, void (*activation)(float* const, const size_t* const), float parameter);
-neuromorph_node* neuromorph_output_init(size_t buffer_size, void (*activation)(float* const, const size_t* const), float activation_parameter, float (*loss)(float* const, const float* const, const float* const, const size_t* const), float loss_parameter);
+neuromorph_node* neuromorph_layer_init(size_t buffer_size, void (*activation)(float* const, const size_t* const, float), float parameter);
+neuromorph_node* neuromorph_output_init(size_t buffer_size, void (*activation)(float* const, const size_t* const, float), float activation_parameter, float (*loss)(float* const, const float* const, const float* const, const size_t* const, float), float loss_parameter);
 
 void neuromorph_node_free(neuromorph_node*);
 
@@ -78,8 +78,8 @@ VECTOR(vector_u64, ast_node_id)
 
 typedef struct neuromorph_layer_args{
 	size_t layer_size;
-	void (*activation_function)(float* const, const size_t* const);
-	float (*loss_function)(float* const, const float* const, const float* const, const size_t* const);
+	void (*activation_function)(float* const, const size_t* const, float);
+	float (*loss_function)(float* const, const float* const, const float* const, const size_t* const, float);
 	float activation_parameter;
 	float loss_parameter;
 	uint8_t input;
@@ -134,8 +134,8 @@ typedef enum PARAMETRIC_FUNCTION_TYPE{
 }PARAMETRIC_FUNCTION_TYPE;
 
 typedef union parametric_function_data{
-	void (*activation)(float* const buffer, const size_t* const size);
-	float (*loss)(float* const buffer, const float* const result, const float* const expected, const size_t* const buffer_size);
+	void (*activation)(float* const buffer, const size_t* const size, float parameter);
+	float (*loss)(float* const buffer, const float* const result, const float* const expected, const size_t* const buffer_size, float parameter);
 }parametric_function_data;
 
 typedef struct parametric_function{
@@ -182,24 +182,25 @@ void convergence_average(const float* const path, float* const buffer, const siz
 
 #define PARAMETRIC_FUNCTION_COUNT 18
 
-float loss_mse(float* const buffer, const float* const result, const float* const expected, const size_t* const size);
-float loss_mae(float* const buffer, const float* const result, const float* const expected, const size_t* const size);
-float loss_mape(float* const buffer, const float* const result, const float* const expected, const size_t* const size);
-float loss_huber(float* const buffer, const float* const result, const float* const expected, const size_t* const size);
-float loss_cross_entropy(float* const buffer, const float* const result, const float* const expected, const size_t* const size);
-float loss_hinge(float* const buffer, const float* const result, const float* const expected, const size_t* const size);
+float loss_mse(float* const buffer, const float* const result, const float* const expected, const size_t* const size, float parameter);
+float loss_mae(float* const buffer, const float* const result, const float* const expected, const size_t* const size, float parameter);
+float loss_mape(float* const buffer, const float* const result, const float* const expected, const size_t* const size, float parameter);
+float loss_huber(float* const buffer, const float* const result, const float* const expected, const size_t* const size, float parameter);
+float loss_huber_modified(float* const buffer, const float* const result, const float* const expected, const size_t* const size, float parameter);
+float loss_cross_entropy(float* const buffer, const float* const result, const float* const expected, const size_t* const size, float parameter);
+float loss_hinge(float* const buffer, const float* const result, const float* const expected, const size_t* const size, float parameter);
 
-void activation_sigmoid(float* const buffer, const size_t* const size);
-void activation_relu(float* const buffer, const size_t* const size);
-void activation_tanh(float* const buffer, const size_t* const size);
-void activation_binary_step(float* const buffer, const size_t* const size);
-void activation_linear(float* const buffer, const size_t* const size);
-void activation_relu_leaky(float* const buffer, const size_t* const size);
-void activation_relu_parametric(float* const buffer, const size_t* size);
-void activation_elu(float* const buffer, const size_t* size);
-void activation_softmax(float* const buffer, const size_t* size);
-void activation_swish(float* const buffer, const size_t* size);
-void activation_gelu(float* const buffer, const size_t* size);
-void activation_selu(float* const buffer, const size_t* size);
+void activation_sigmoid(float* const buffer, const size_t* const size, float parameter);
+void activation_relu(float* const buffer, const size_t* const size, float parameter);
+void activation_tanh(float* const buffer, const size_t* const size, float parameter);
+void activation_binary_step(float* const buffer, const size_t* const size, float parameter);
+void activation_linear(float* const buffer, const size_t* const size, float parameter);
+void activation_relu_leaky(float* const buffer, const size_t* const size, float parameter);
+void activation_relu_parametric(float* const buffer, const size_t* size, float parameter);
+void activation_elu(float* const buffer, const size_t* size, float parameter);
+void activation_softmax(float* const buffer, const size_t* size, float parameter);
+void activation_swish(float* const buffer, const size_t* size, float parameter);
+void activation_gelu(float* const buffer, const size_t* size, float parameter);
+void activation_selu(float* const buffer, const size_t* size, float parameter);
 
 #endif
