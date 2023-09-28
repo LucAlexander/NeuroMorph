@@ -46,14 +46,14 @@ neuromorph_node* neuromorph_divergent_init(){
 	return node;
 }
 
-neuromorph_node* neuromorph_convergent_init(void (*convergence)(const float* const, float* const, const size_t* const)){
+neuromorph_node* neuromorph_convergent_init(void (*convergence)(const float* const, float* const, const size_t)){
 	neuromorph_node* node = neuromorph_divergent_init();
 	node->convergence_function = convergence;
 	node->type = CONVERGENT_NODE;
 	return node;
 }
 
-neuromorph_node* neuromorph_layer_init(size_t buffer_size, void (*activation)(float* const, const size_t* const, float), float parameter){
+neuromorph_node* neuromorph_layer_init(size_t buffer_size, void (*activation)(float* const, const size_t, const float), float parameter){
 	neuromorph_node* node = neuromorph_input_init(buffer_size);
 	node->bias_buffer = malloc(sizeof(float)*buffer_size);
 	node->bias_buffer_size = buffer_size;
@@ -63,7 +63,7 @@ neuromorph_node* neuromorph_layer_init(size_t buffer_size, void (*activation)(fl
 	return node;
 }
 
-neuromorph_node* neuromorph_output_init(size_t buffer_size, void (*activation)(float* const, const size_t* const, float), float activation_parameter, float (*loss)(float* const, const float* const, const float* const, const size_t* const, float), float loss_parameter){
+neuromorph_node* neuromorph_output_init(size_t buffer_size, void (*activation)(float* const, const size_t, const float), float activation_parameter, float (*loss)(float* const, const float* const, const float* const, const size_t, const float), float loss_parameter){
 	neuromorph_node* node = neuromorph_layer_init(buffer_size, activation, activation_parameter);
 	node->loss_function = loss;
 	node->loss_parameter = loss_parameter;
@@ -804,61 +804,533 @@ neuromorph_node* neuromorph_build_branch(neuromorph_ast* ast, ast_node_id node_i
 	return initial;
 }
 
+/*
+ * 1. x86_64 Architecture:
+
+    SSE: While older, SSE is still relevant and provides a baseline of SIMD support for nearly all x86_64 CPUs.
+    AVX: Covers many modern but not the latest CPUs. AVX and AVX2 are commonly supported and offer significant performance improvements for many tasks.
+    AVX-512: Found in some high-end Intel CPUs and Xeon processors. It's especially relevant for HPC and data center environments.
+
+2. ARM Architecture:
+
+    NEON: If you later decide to support ARM, NEON is the SIMD technology for ARM processors. It’s widely supported in ARMv7 and ARMv8 architectures.
+
+3. GPU Acceleration:
+
+    CUDA: For NVIDIA GPUs. A significant portion of machine learning, especially deep learning, is accelerated using NVIDIA GPUs.
+    OpenCL/ROCm: For AMD GPUs and other accelerators. OpenCL is a framework for writing programs that execute across heterogeneous platforms.
+
+Feasible Steps for Implementation:
+
+    Baseline Implementation:
+        Begin with a scalar (non-vectorized) baseline implementation that works on any architecture.
+
+    x86_64 Optimizations:
+        Implement optimizations for SSE, AVX, and AVX-512. This can be done incrementally, starting with the most commonly supported instruction sets (SSE and AVX).
+
+    GPU Acceleration (Optional):
+        Depending on the nature of your machine learning tasks, consider implementing GPU-accelerated versions using CUDA or OpenCL. GPUs are prevalent in the machine learning field.
+
+    ARM Support (Future Expansion):
+        When you’re ready to expand, add support for ARM with NEON optimizations. This will be especially relevant for mobile devices, some servers, and Apple Silicon Macs.
+
+    Library Utilization:
+        Consider using libraries like Intel MKL, OpenBLAS, or cuBLAS for matrix operations, which are already optimized for various architectures.
+
+    Testing and Validation:
+        Ensure comprehensive testing on different architectures to validate performance and correctness.
+
+Summarized Strategy:
+
+    Short Term: Focus on x86_64, covering SSE through AVX-512. Consider GPU acceleration if relevant for your tasks.
+    Medium Term: Evaluate the need for ARM support based on your user base and application requirements. Implement ARM NEON optimizations if needed.
+    Long Term: Keep an eye on emerging trends. For example, RISC-V is gaining traction, and the landscape of accelerators (GPUs, TPUs, FPGAs, etc.) is evolving.
+ */
 //TODO vectorize everything!!!!!
-//TODO apparently the overhead from dereferencing is larger than I realized, might be best to keep scalar arguments as copies so that they can be stuffed in a register
-void convergence_multiplicative(const float* const path, float* const buffer, const size_t* const buffer_size){
-	for (size_t i = 0;i<*buffer_size;++i){
+#if defined(sse)
+void convergence_multiplicative(const float* const path, float* const buffer, const size_t buffer_size){
+	size_t i;
+	for (i = 0;i<=buffer_size-4;i+=4){
+		__m128 p = _mm_loadu_ps(path+i);
+		__m128 b = _mm_loadu_ps(buffer+i);
+		__m128 result = _mm_mul_ps(p, b);
+		_mm_storeu_ps(buffer+i, result);
+	}
+	for (;i<buffer_size;++i){
 		buffer[i] *= path[i];
 	}
 }
 
-void convergence_additive(const float* const path, float* const buffer, const size_t* const buffer_size){
-	for (size_t i = 0;i<*buffer_size;++i){
+void convergence_additive(const float* const path, float* const buffer, const size_t buffer_size){
+	size_t i;
+	for(i = 0;i<=buffer_size-4;i+=4){
+		__m128 p = _mm_loadu_ps(path+i);
+		__m128 b = _mm_loadu_ps(buffer+i);
+		__m128 result = _mm_add_ps(p, b);
+		_mm_storeu_ps(buffer + i, result);
+	}
+	for (;i<buffer_size;++i){
 		buffer[i] += path[i];
 	}
 }
 
-void convergence_average(const float* const path, float* const buffer, const size_t* const buffer_size){
-	for (size_t i = 0;i<*buffer_size;++i){
+void convergence_average(const float* const path, float* const buffer, const size_t buffer_size){
+	size_t i;
+	__m128 two = _mm_set1_ps(2.0f);
+	for (i = 0;i<=buffer_size-4;i+=4){
+		__m128 p = _mm_loadu_ps(path+i);
+		__m128 b = _mm_loadu_ps(buffer+i);
+		__m128 s = _mm_add_ps(p, b);
+		__m128 avg = _mm_div_ps(s, two);
+		_mm_storeu_ps(buffer+i, avg);
+	}
+	for (;i<buffer_size;++i){
 		buffer[i] = (buffer[i]+path[i])/2;
 	}
 }
 
-float loss_mse(float* const buffer, const float* const result, const float* const expected, const size_t* const size, float parameter){
-	float sum = 0;
-	for (size_t i = 0;i<*size;++i){
+float loss_mse(float* const buffer, const float* const result, const float* const expected, const size_t size, const float parameter){
+	__m128 s = _mm_setzero_ps();
+	size_t i;
+	for (i= 0;i<=size-4;i+=4){
+		__m128 e = _mm_loadu_ps(expected+i);
+		__m128 r = _mm_loadu_ps(result+i);
+		__m128 loss = _mm_sub_ps(e, r);
+		_mm_storeu_ps(buffer+i,loss);
+		__m128 loss_squared = _mm_mul_ps(loss, loss);
+		s = _mm_add_ps(s,loss_squared);
+	}
+	float sum_array[4];
+	_mm_storeu_ps(sum_array, s);
+	float sum = sum_array[0]+sum_array[1]+sum_array[2]+sum_array[3];
+	for (;i<size;++i){
 		float loss = expected[i]-result[i];
 		buffer[i] = loss;
 		sum += loss*loss;
 	}
-	return (sum)/(*size);
+	return (sum)/(size);
 }
 
-float loss_mae(float* const buffer, const float* const result, const float* const expected, const size_t* const size, float parameter){
+float loss_mae(float* const buffer, const float* const result, const float* const expected, const size_t size, const float parameter){
+	__m128 s = _mm_setzero_ps();
+	size_t i;
+	for (i= 0;i<=size-4;i+=4){
+		__m128 e = _mm_loadu_ps(expected+i);
+		__m128 r = _mm_loadu_ps(result+i);
+		__m128 loss = _mm_sub_ps(e, r);
+		_mm_storeu_ps(buffer+i,loss);
+		__m128 abs_loss = _mm_andnot_ps(_mm_set1_ps(-0.f), loss);
+		s = _mm_add_ps(s,abs_loss);
+	}
+	float sum_array[4];
+	_mm_storeu_ps(sum_array, s);
+	float sum = sum_array[0]+sum_array[1]+sum_array[2]+sum_array[3];
+	for (;i<size;++i){
+		float loss = expected[i]-result[i];
+		buffer[i] = loss;
+		sum += fabsf(loss);
+	}
+	return sum/(size);
+}
+
+float loss_mape(float* const buffer, const float* const result, const float* const expected, const size_t size, const float parameter){
+	__m128 s = _mm_setzero_ps();
+	size_t i;
+	for (i= 0;i<=size-4;i+=4){
+		__m128 e = _mm_loadu_ps(expected+i);
+		__m128 r = _mm_loadu_ps(result+i);
+		__m128 loss = _mm_sub_ps(e, r);
+		_mm_storeu_ps(buffer+i,loss);
+		__m128 abs_loss = _mm_andnot_ps(_mm_set1_ps(-0.f), loss);
+		__m128 loss_div_e = _mm_div_ps(abs_loss, e);
+		s = _mm_add_ps(s,loss_div_e);
+	}
+	float sum_array[4];
+	_mm_storeu_ps(sum_array, s);
+	float sum = sum_array[0]+sum_array[1]+sum_array[2]+sum_array[3];
+	for (;i<size;++i){
+		float expect = expected[i];
+		float loss = expect-result[i];
+		buffer[i] = loss;
+		sum += fabsf(loss/expect);
+	}
+	return sum/(size);
+}
+
+float loss_huber(float* const buffer, const float* const result, const float* const expected, const size_t size, const float parameter){
+	__m128 s = _mm_setzero_ps();
+	__m128 param_sq_half = _mm_set1_ps(parameter*parameter*0.5f);
+	__m128 param = _mm_set1_ps(parameter);
+	__m128 half = _mm_set1_ps(0.5f);
+	size_t i;
+	for (i= 0;i<=size-4;i+=4){
+		__m128 e = _mm_loadu_ps(expected+i);
+		__m128 r = _mm_loadu_ps(result+i);
+		__m128 loss = _mm_sub_ps(e, r);
+		_mm_storeu_ps(buffer+i,loss);
+		__m128 abs_loss = _mm_andnot_ps(_mm_set1_ps(-0.f), loss);
+		__m128 mask = _mm_cmple_ps(abs_loss, param);
+		__m128 case1 = _mm_mul_ps(_mm_mul_ps(loss, loss), half);
+		__m128 case2 = _mm_sub_ps(_mm_mul_ps(param, abs_loss), param_sq_half);
+		__m128 combined = _mm_or_ps(_mm_and_ps(mask, case1), _mm_andnot_ps(mask, case2));
+		s = _mm_add_ps(s,combined);
+	}
+	float sum_array[4];
+	_mm_storeu_ps(sum_array, s);
+	float sum = sum_array[0]+sum_array[1]+sum_array[2]+sum_array[3];
+	float hpsq = parameter*parameter*0.5;
+	for (;i<size;++i){
+		float expect = expected[i];
+		float res = result[i];
+		float x = expect-res;
+		buffer[i] = x;
+		if (abs(x) <= parameter){
+			sum += x*x*0.5;
+			continue;
+		}
+		sum += (parameter*fabsf(x))-hpsq;
+	}
+	return sum;
+}
+
+float loss_huber_modified(float* const buffer, const float* const result, const float* const expected, const size_t size, const float parameter){
+	__m128 s = _mm_setzero_ps();
+	size_t i;
+	for (i= 0;i<=size-4;i+=4){
+		__m128 e = _mm_loadu_ps(expected+i);
+		__m128 r = _mm_loadu_ps(result+i);
+		__m128 loss = _mm_sub_ps(e, r);
+		_mm_storeu_ps(buffer+i,loss);
+		__m128 prod = _mm_mul_ps(e, r);
+		__m128 mask = _mm_cmpgt_ps(prod, _mm_set1_ps(-1.f));
+		__m128 ones = _mm_set1_ps(1.f);
+		__m128 sub = _mm_sub_ps(ones, prod);
+		__m128 zeros = _mm_setzero_ps();
+		__m128 case1 = _mm_max_ps(zeros, sub);
+		case1 = _mm_mul_ps(case1, case1);
+		__m128 case2 = _mm_mul_ps(_mm_set1_ps(-4.f), prod);
+		__m128 combined = _mm_or_ps(_mm_and_ps(mask, case1), _mm_andnot_ps(mask, case2));
+		s = _mm_add_ps(s,combined);
+	}
+	float sum_array[4];
+	_mm_storeu_ps(sum_array, s);
+	float sum = sum_array[0]+sum_array[1]+sum_array[2]+sum_array[3];
+	for (;i<size;++i){
+		float expect = expected[i];
+		float res = result[i];
+		float x = expect-res;
+		buffer[i] = x;
+		x = expect*res;
+		if (x > -1){
+			sum += powf(fmaxf(0, 1-x),2);
+			continue;
+		}
+		sum -= 4*x;
+	}
+	return sum;
+}
+
+float loss_cross_entropy(float* const buffer, const float* const result, const float* const expected, const size_t size, const float parameter){
+	__m128 s = _mm_setzero_ps();
+	size_t i;
+	for (i= 0;i<=size-4;i+=4){
+		__m128 e = _mm_loadu_ps(expected+i);
+		__m128 r = _mm_loadu_ps(result+i);
+		__m128 loss = _mm_sub_ps(e, r);
+		_mm_storeu_ps(buffer+i,loss);
+		__m128 log_r = _mm_set_ps(logf(r[3]), logf(r[2]), logf(r[1]), logf(r[0]));
+		__m128 term = _mm_mul_ps(e, log_r);
+		s = _mm_add_ps(s,term);
+	}
+	float sum_array[4];
+	_mm_storeu_ps(sum_array, s);
+	float sum = sum_array[0]+sum_array[1]+sum_array[2]+sum_array[3];
+	for (;i<size;++i){
+		float expect = expected[i];
+		float res = result[i];
+		buffer[i] = expect-res;
+		sum += expect*logf(res);
+	}
+	return -sum;
+}
+
+float loss_hinge(float* const buffer, const float* const result, const float* const expected, const size_t size, const float parameter){
+	__m128 s = _mm_setzero_ps();
+	size_t i;
+	for (i= 0;i<=size-4;i+=4){
+		__m128 e = _mm_loadu_ps(expected+i);
+		__m128 r = _mm_loadu_ps(result+i);
+		__m128 loss = _mm_sub_ps(e, r);
+		_mm_storeu_ps(buffer+i,loss);
+		__m128 prod = _mm_mul_ps(e, r);
+		__m128 ones = _mm_set1_ps(1.0f);
+		__m128 term = _mm_sub_ps(ones, prod);
+		__m128 zeros = _mm_setzero_ps();
+		__m128 hinge = _mm_max_ps(zeros, term);
+		s = _mm_add_ps(s,hinge);
+	}
+	float sum_array[4];
+	_mm_storeu_ps(sum_array, s);
+	float sum = sum_array[0]+sum_array[1]+sum_array[2]+sum_array[3];
+	for (;i<size;++i){
+		float expect = expected[i];
+		float res = result[i];
+		buffer[i] = expect-res;
+		sum += fmaxf(0,1-(expect*res));
+	}
+	return sum;
+}
+
+__m128 exp_neg_ps(__m128 x) {
+	const __m128 one = _mm_set1_ps(1.0f);
+	const __m128 exp_c1 = _mm_set1_ps(0.04166669f);
+	const __m128 exp_c2 = _mm_set1_ps(0.5000004f);
+	__m128 x2 = _mm_mul_ps(x, x);  // x^2
+	__m128 x3 = _mm_mul_ps(x2, x); // x^3
+	// Compute the polynomial approximation: e^-x ≈ 1 - x - x^2/2 - x^3/6
+	__m128 poly = _mm_sub_ps(one, x);        // 1 - x
+	poly = _mm_sub_ps(poly, _mm_mul_ps(exp_c2, x2)); // 1 - x - x^2/2
+	poly = _mm_sub_ps(poly, _mm_mul_ps(exp_c1, x3)); // 1 - x - x^2/2 - x^3/6
+	return poly;
+}
+
+void activation_sigmoid(float* const buffer, const size_t size, const float parameter){
+	size_t i;
+	const __m128 one = _mm_set1_ps(1.0f);
+	for (i = 0;i<=size-4;i+=4){
+		__m128 x = _mm_loadu_ps(buffer+1);
+		x = _mm_xor_ps(x, _mm_set1_ps(-0.f));
+		__m128 exp_neg_x = exp_neg_ps(x);
+		__m128 sigmoid = _mm_div_ps(one, _mm_add_ps(one, exp_neg_x));
+		_mm_storeu_ps(buffer+i, sigmoid);
+	}
+	for (;i<size;++i){
+		buffer[i] = 1/(1+expf(-buffer[i]));
+	}
+}
+
+void activation_relu(float* const buffer, const size_t size, const float parameter){
+	size_t i;
+	for (i = 0;i<=size-4;i+=4){
+		__m128 zeros = _mm_setzero_ps();
+		__m128 term = _mm_loadu_ps(buffer+i);
+		__m128 relu = _mm_max_ps(zeros, term);
+		_mm_storeu_ps(buffer+i, relu);
+	}
+	for (;i<size;++i){
+		buffer[i] = fmaxf(0,buffer[i]);
+	}
+}
+
+__m128 tanh_ps(__m128 x) {
+    const __m128 one = _mm_set1_ps(1.0f);
+    // Calculate e^(2x)
+    __m128 exp2x = exp_neg_ps(_mm_mul_ps(x, _mm_set1_ps(-2.0f)));
+    exp2x = _mm_rcp_ps(exp2x);
+    // Calculate (e^(2x) - 1) / (e^(2x) + 1)
+    __m128 num = _mm_sub_ps(exp2x, one);
+    __m128 den = _mm_add_ps(exp2x, one);
+    __m128 tanh_x = _mm_div_ps(num, den);
+    return tanh_x;
+}
+
+void activation_tanh(float* const buffer, const size_t size, const float parameter){
+	size_t i;
+	for (i = 0;i<=size-4;i+=4){
+		__m128 x = _mm_loadu_ps(buffer+i);
+		__m128 tanh_approx = tanh_ps(x);
+		_mm_storeu_ps(buffer+i, tanh_approx);
+	}
+	for (;i<size;++i){
+		buffer[i] = tanh(buffer[i]);
+	}
+}
+
+void activation_binary_step(float* const buffer, const size_t size, const float parameter){
+	const __m128 zero = _mm_setzero_ps();
+	size_t i;
+	for (i = 0;i<=size-4;i+=4){
+		__m128 x = _mm_loadu_ps(buffer+i);
+		__m128 step = _mm_cmpge_ps(x, zero);
+		_mm_storeu_ps(buffer+i, step);
+	}
+	for (;i<size;++i){
+		buffer[i] = buffer[i] >= 0;
+	}
+}
+
+void activation_linear(float* const buffer, const size_t size, const float parameter){
+	return;
+}
+
+void activation_relu_leaky(float* const buffer, const size_t size, const float parameter){
+	size_t i;
+	const __m128 tenth = _mm_set1_ps(0.1f);
+	for (i=0;i<=size-4;i+=4){
+		__m128 x = _mm_loadu_ps(buffer+i);
+		__m128 term = _mm_max_ps(_mm_mul_ps(tenth, x), x);
+		_mm_storeu_ps(buffer+i, term);
+	}
+	for (;i<size;++i){
+		float x = buffer[i];
+		buffer[i] = fmaxf(0.1*x,x);
+	}
+}
+
+void activation_relu_parametric(float* const buffer, const size_t size, const float parameter){
+	size_t i;
+	const __m128 tenth = _mm_set1_ps(parameter);
+	for (i=0;i<=size-4;i+=4){
+		__m128 x = _mm_loadu_ps(buffer+i);
+		__m128 term = _mm_max_ps(_mm_mul_ps(tenth, x), x);
+		_mm_storeu_ps(buffer+i, term);
+	}
+	for (;i<size;++i){
+		float x = buffer[i];
+		buffer[i] = fmaxf(parameter*x,x);
+	}
+}
+
+void activation_elu(float* const buffer, const size_t size, const float parameter){
+	const __m128 zero = _mm_setzero_ps();
+	const __m128 one = _mm_set1_ps(1.0f);
+	const __m128 alpha = _mm_set1_ps(parameter);
+	size_t i;
+	for (i=0;i<=size-4;i+=4){
+		__m128 x = _mm_loadu_ps(buffer+i);
+		__m128 mask = _mm_cmplt_ps(x, zero);
+		__m128 negs = _mm_and_ps(mask, _mm_mul_ps(alpha, _mm_sub_ps(exp_neg_ps(x), one)));
+		__m128 term = _mm_add_ps(_mm_andnot_ps(mask, x), negs);
+		_mm_storeu_ps(buffer+i, term);
+	}
+	for (;i<size;++i){
+		float x = buffer[i];
+		if (x < 0){
+			buffer[i] = parameter*(expf(x)-1);
+		}
+	}
+}
+
+void activation_softmax(float* const buffer, const size_t size, const float parameter){
+	__m128 s = _mm_setzero_ps();
+	const __m128 n1 = _mm_set1_ps(-1.0f);
+	size_t i;
+	for (i = 0;i<=size-4;i+=4){
+		__m128 x = _mm_loadu_ps(buffer+i);
+		__m128 exp_x = exp_neg_ps(_mm_mul_ps(x, n1));
+		s = _mm_add_ps(s, exp_x);
+	}
+	float simd_s[4];
+	_mm_storeu_ps(simd_s, s);
+	float denom = simd_s[0]+simd_s[1]+simd_s[2]+simd_s[3];
+	for (;i<size;++i){
+		denom += expf(buffer[i]);
+	}
+	const __m128 d = _mm_set1_ps(denom);
+	for (i = 0;i<=size-4;i+=4){
+		__m128 x = _mm_loadu_ps(buffer+i);
+		__m128 exp_x = exp_neg_ps(_mm_mul_ps(x, n1));
+		__m128 term = _mm_div_ps(exp_x, d);
+		_mm_storeu_ps(buffer+i, term);
+	}
+	for (;i<size;++i){
+		buffer[i] = expf(buffer[i])/denom;
+	}
+}
+
+void activation_swish(float* const buffer, const size_t size, const float parameter){
+	size_t i;
+	const __m128 one = _mm_set1_ps(1.0f);
+	for (i = 0;i<=size-4;i+=4){
+		__m128 x = _mm_loadu_ps(buffer+i);
+		__m128 denom = _mm_add_ps(one, exp_neg_ps(x));
+		__m128 term = _mm_div_ps(x, denom);
+		_mm_storeu_ps(buffer+i, term);
+	}
+	for (;i<size;++i){
+		float x = buffer[i];
+		buffer[i] = x/(1+expf(-x));
+	}
+}
+
+void activation_gelu(float* const buffer, const size_t size, const float parameter){
+	size_t i;
+	const float s2p = sqrtf(2.0f)/PI;
+	const __m128 half = _mm_set1_ps(0.5f);
+	const __m128 one = _mm_set1_ps(1.0f);
+	const __m128 sqrt2vpi = _mm_set1_ps(s2p);
+	const __m128 gelu_c = _mm_set1_ps(GELU_C);
+	for (i = 0;i<=size-4;i+=4){
+		__m128 x = _mm_loadu_ps(buffer+i);
+		__m128 a = _mm_mul_ps(sqrt2vpi, _mm_add_ps(x, _mm_mul_ps(gelu_c, _mm_mul_ps(x, _mm_mul_ps(x, x)))));
+		__m128 tanh_a = tanh_ps(a);
+		__m128 gelu = _mm_mul_ps(half, _mm_mul_ps(x, _mm_add_ps(one, tanh_a)));
+		_mm_storeu_ps(buffer+i, gelu);
+	}
+	for (;i<size;++i){
+		float x = buffer[i];
+		buffer[i] = 0.5*x*(1+tanh(s2p*(x+(GELU_C*powf(x,3)))));
+	}
+}
+
+void activation_selu(float* const buffer, const size_t size, const float parameter){
+	//TODO unfortunately not possible with current compiler, will need more compelx syntax logic for describing activation functions, allowing multiple parameters
+}
+
+#else
+void convergence_multiplicative(const float* const path, float* const buffer, const size_t buffer_size){
+	for (size_t i = 0;i<buffer_size;++i){
+		buffer[i] *= path[i];
+	}
+}
+
+void convergence_additive(const float* const path, float* const buffer, const size_t buffer_size){
+	for (size_t i = 0;i<buffer_size;++i){
+		buffer[i] += path[i];
+	}
+}
+
+void convergence_average(const float* const path, float* const buffer, const size_t buffer_size){
+	for (size_t i = 0;i<buffer_size;++i){
+		buffer[i] = (buffer[i]+path[i])/2;
+	}
+}
+
+float loss_mse(float* const buffer, const float* const result, const float* const expected, const size_t size, const float parameter){
 	float sum = 0;
-	for (size_t i = 0;i<*size;++i){
+	for (size_t i = 0;i<size;++i){
+		float loss = expected[i]-result[i];
+		buffer[i] = loss;
+		sum += loss*loss;
+	}
+	return (sum)/(size);
+}
+
+float loss_mae(float* const buffer, const float* const result, const float* const expected, const size_t size, const float parameter){
+	float sum = 0;
+	for (size_t i = 0;i<size;++i){
 		float loss = expected[i]-result[i];
 		buffer[i] = loss;
 		sum += abs(loss);
 	}
-	return sum/(*size);
+	return sum/(size);
 }
 
-float loss_mape(float* const buffer, const float* const result, const float* const expected, const size_t* const size, float parameter){
+float loss_mape(float* const buffer, const float* const result, const float* const expected, const size_t size, const float parameter){
 	float sum = 0;
-	for (size_t i = 0;i<*size;++i){
+	for (size_t i = 0;i<size;++i){
 		float expect = expected[i];
 		float loss = expect-result[i];
 		buffer[i] = loss;
 		sum += abs(loss/expect);
 	}
-	return sum/(*size);
+	return sum/(size);
 }
 
-float loss_huber(float* const buffer, const float* const result, const float* const expected, const size_t* const size, float parameter){
+float loss_huber(float* const buffer, const float* const result, const float* const expected, const size_t size, const float parameter){
 	float sum = 0;
 	float hpsq = parameter*parameter*0.5;
-	for (size_t i = 0;i<*size;++i){
+	for (size_t i = 0;i<size;++i){
 		float expect = expected[i];
 		float res = result[i];
 		float x = expect-res;
@@ -872,9 +1344,9 @@ float loss_huber(float* const buffer, const float* const result, const float* co
 	return sum;
 }
 
-float loss_huber_modified(float* const buffer, const float* const result, const float* const expected, const size_t* const size, float parameter){
+float loss_huber_modified(float* const buffer, const float* const result, const float* const expected, const size_t size, const float parameter){
 	float sum = 0;
-	for (size_t i = 0;i<*size;++i){
+	for (size_t i = 0;i<size;++i){
 		float expect = expected[i];
 		float res = result[i];
 		float x = expect-res;
@@ -889,9 +1361,9 @@ float loss_huber_modified(float* const buffer, const float* const result, const 
 	return sum;
 }
 
-float loss_cross_entropy(float* const buffer, const float* const result, const float* const expected, const size_t* const size, float parameter){
+float loss_cross_entropy(float* const buffer, const float* const result, const float* const expected, const size_t size, const float parameter){
 	float sum = 0;
-	for (size_t i = 0;i<*size;++i){
+	for (size_t i = 0;i<size;++i){
 		float expect = expected[i];
 		float res = result[i];
 		buffer[i] = expect-res;
@@ -900,9 +1372,9 @@ float loss_cross_entropy(float* const buffer, const float* const result, const f
 	return -sum;
 }
 
-float loss_hinge(float* const buffer, const float* const result, const float* const expected, const size_t* const size, float parameter){
+float loss_hinge(float* const buffer, const float* const result, const float* const expected, const size_t size, const float parameter){
 	float sum = 0;
-	for (size_t i = 0;i<*size;++i){
+	for (size_t i = 0;i<size;++i){
 		float expect = expected[i];
 		float res = result[i];
 		buffer[i] = expect-res;
@@ -911,89 +1383,91 @@ float loss_hinge(float* const buffer, const float* const result, const float* co
 	return sum;
 }
 
-void activation_sigmoid(float* const buffer, const size_t* const size, float parameter){
-	for (size_t i = 0;i<*size;++i){
-		buffer[i] = 1/(1+pow(EULER, -buffer[i]));
+void activation_sigmoid(float* const buffer, const size_t size, const float parameter){
+	for (size_t i = 0;i<size;++i){
+		buffer[i] = 1/(1+expf(-buffer[i]));
 	}
 }
 
-void activation_relu(float* const buffer, const size_t* const size, float parameter){
-	for (size_t i = 0;i<*size;++i){
+void activation_relu(float* const buffer, const size_t size, const float parameter){
+	for (size_t i = 0;i<size;++i){
 		buffer[i] = fmax(0,buffer[i]);
 	}
 }
 
-void activation_tanh(float* const buffer, const size_t* const size, float parameter){
-	for (size_t i = 0;i<*size;++i){
+void activation_tanh(float* const buffer, const size_t size, const float parameter){
+	for (size_t i = 0;i<size;++i){
 		buffer[i] = tanh(buffer[i]);
 	}
 }
 
-void activation_binary_step(float* const buffer, const size_t* const size, float parameter){
-	for (size_t i = 0;i<*size;++i){
+void activation_binary_step(float* const buffer, const size_t size, const float parameter){
+	for (size_t i = 0;i<size;++i){
 		buffer[i] = buffer[i] >= 0;
 	}
 }
 
-void activation_linear(float* const buffer, const size_t* const size, float parameter){
+void activation_linear(float* const buffer, const size_t size, const float parameter){
 	return;
 }
 
-void activation_relu_leaky(float* const buffer, const size_t* const size, float parameter){
+void activation_relu_leaky(float* const buffer, const size_t size, const float parameter){
 	float x;
-	for (size_t i = 0;i<*size;++i){
+	for (size_t i = 0;i<size;++i){
 		x = buffer[i];
 		buffer[i] = fmax(0.1*x,x);
 	}
 }
 
-void activation_relu_parametric(float* const buffer, const size_t* size, float parameter){
+void activation_relu_parametric(float* const buffer, const size_t size, const float parameter){
 	float x;
-	for (size_t i = 0;i<*size;++i){
+	for (size_t i = 0;i<size;++i){
 		x = buffer[i];
 		buffer[i] = fmax(parameter*x, x);
 	}
 }
 
-void activation_elu(float* const buffer, const size_t* size, float parameter){
+void activation_elu(float* const buffer, const size_t size, const float parameter){
 	float x;
-	for (size_t i = 0;i<*size;++i){
+	for (size_t i = 0;i<size;++i){
 		x = buffer[i];
 		if (x < 0){
-			buffer[i] = parameter*(pow(EULER, x)-1);
+			buffer[i] = parameter*(expf(x)-1);
 		}
 	}
 }
 
-void activation_softmax(float* const buffer, const size_t* size, float parameter){
+void activation_softmax(float* const buffer, const size_t size, const float parameter){
 	float denom = 0;
-	for (size_t i = 0;i<*size;++i){
-		denom += pow(EULER, buffer[i]);
+	for (size_t i = 0;i<size;++i){
+		denom += expf(buffer[i]);
 	}
-	for (size_t i = 0;i<*size;++i){
-		buffer[i] = pow(EULER, buffer[i])/denom;
+	for (size_t i = 0;i<size;++i){
+		buffer[i] = expf(buffer[i])/denom;
 	}
 }
 
-void activation_swish(float* const buffer, const size_t* size, float parameter){
+void activation_swish(float* const buffer, const size_t size, const float parameter){
 	float x;
-	for (size_t i = 0;i<*size;++i){
+	for (size_t i = 0;i<size;++i){
 		x = buffer[i];
-		buffer[i] = x/(1+pow(EULER,-x));
+		buffer[i] = x/(1+expf(-x));
 	}
 }
 
-void activation_gelu(float* const buffer, const size_t* size, float parameter){
+void activation_gelu(float* const buffer, const size_t size, const float parameter){
 	float x;
-	for (size_t i = 0;i<*size;++i){
+	const float s2p  = sqrtf(2/PI);
+	for (size_t i = 0;i<size;++i){
 		x = buffer[i];
-		buffer[i] = 0.5*x*(1+tanh(sqrt(2/PI)*(x+(GELU_C*pow(x,3)))));
+		buffer[i] = 0.5*x*(1+tanh(s2p*(x+(GELU_C*pow(x,3)))));
 	}
 }
 
-void activation_selu(float* const buffer, const size_t* size, float parameter){
+void activation_selu(float* const buffer, const size_t size, const float parameter){
 	//TODO unfortunately not possible with current compiler, will need more compelx syntax logic for describing activation functions, allowing multiple parameters
 }
+#endif
 
 static PyObject* helloworld(PyObject* self, PyObject* args){
 	neuromorph* model = neuromorph_compile("(input, 64, sigmoid)[divman,(branchyboi, 128, relu)(bb,256,relu){converge2, otherman, additive}(alex, 768, tanh)|(otherman,48,sigmoid)]{convergeman, alex, multiplicative}(output, 12, sigmoid, mse)");
