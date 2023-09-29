@@ -673,7 +673,7 @@ uint8_t neuromorph_divergence_check_legal(neuromorph_divergence_args divergence,
 }
 
 uint8_t neuromorph_convergence_check_legal(neuromorph_convergence_args convergence, neuromorph_ast* const ast){
-	if (convergence.path <= 0){
+	if (convergence.path == -1){
 		fprintf(stderr, "invalid convergence path\n");
 		return 0;
 	}
