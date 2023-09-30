@@ -847,6 +847,9 @@ Summarized Strategy:
     Long Term: Keep an eye on emerging trends. For example, RISC-V is gaining traction, and the landscape of accelerators (GPUs, TPUs, FPGAs, etc.) is evolving.
  */
 //TODO vectorize everything!!!!!
+//look into data prefetching when simulation is done
+//alignment regardless of version
+//more efficient approximations of complex functions
 #if defined(sse)
 void convergence_multiplicative(const float* const path, float* const buffer, const size_t buffer_size){
 	size_t i;
@@ -897,8 +900,12 @@ float loss_mse(float* const buffer, const float* const result, const float* cons
 		__m128 r = _mm_loadu_ps(result+i);
 		__m128 loss = _mm_sub_ps(e, r);
 		_mm_storeu_ps(buffer+i,loss);
+#ifdef fma
+		s = __fmadd_ps(loss, loss, s);
+#else
 		__m128 loss_squared = _mm_mul_ps(loss, loss);
 		s = _mm_add_ps(s,loss_squared);
+#endif
 	}
 	float sum_array[4];
 	_mm_storeu_ps(sum_array, s);
@@ -971,8 +978,16 @@ float loss_huber(float* const buffer, const float* const result, const float* co
 		__m128 abs_loss = _mm_andnot_ps(_mm_set1_ps(-0.f), loss);
 		__m128 mask = _mm_cmple_ps(abs_loss, param);
 		__m128 case1 = _mm_mul_ps(_mm_mul_ps(loss, loss), half);
+#ifdef fma
+		__m128 case2 = _mm_fmsub_ps(param, abs_loss, param_sq_half);
+#else
 		__m128 case2 = _mm_sub_ps(_mm_mul_ps(param, abs_loss), param_sq_half);
+#endif
+#ifdef sse4_1
+		__m128 combined = _mm_blendv_ps(case2, case1, mask);
+#else
 		__m128 combined = _mm_or_ps(_mm_and_ps(mask, case1), _mm_andnot_ps(mask, case2));
+#endif
 		s = _mm_add_ps(s,combined);
 	}
 	float sum_array[4];
@@ -1009,7 +1024,11 @@ float loss_huber_modified(float* const buffer, const float* const result, const 
 		__m128 case1 = _mm_max_ps(zeros, sub);
 		case1 = _mm_mul_ps(case1, case1);
 		__m128 case2 = _mm_mul_ps(_mm_set1_ps(-4.f), prod);
+#ifdef sse4_1
+		__m128 combined = _mm_blendv_ps(case2, case1, mask);
+#else
 		__m128 combined = _mm_or_ps(_mm_and_ps(mask, case1), _mm_andnot_ps(mask, case2));
+#endif
 		s = _mm_add_ps(s,combined);
 	}
 	float sum_array[4];
@@ -1199,8 +1218,21 @@ void activation_elu(float* const buffer, const size_t size, const float paramete
 	for (i=0;i<=size-4;i+=4){
 		__m128 x = _mm_loadu_ps(buffer+i);
 		__m128 mask = _mm_cmplt_ps(x, zero);
+#ifdef sse4_1
+#ifdef fma
+		__m128 negs = _mm_fmadd_ps(alpha, exp_neg_ps(x), _mm_set1_ps(-alpha));
+#else
+		__m128 negs = _mm_mul_ps(alpha, _mm_sub_ps(exp_neg_ps(x), one));
+#endif
+		__m128 term = _mm_blendv_ps(x, negs, mask);
+#else
+#ifdef fma
+		__m128 negs = _mm_and_ps(mask, _mm_fmadd_ps(alpha, exp_neg_ps(x), _mm_set1_ps(-alpha)));
+#else
 		__m128 negs = _mm_and_ps(mask, _mm_mul_ps(alpha, _mm_sub_ps(exp_neg_ps(x), one)));
+#endif
 		__m128 term = _mm_add_ps(_mm_andnot_ps(mask, x), negs);
+#endif
 		_mm_storeu_ps(buffer+i, term);
 	}
 	for (;i<size;++i){
