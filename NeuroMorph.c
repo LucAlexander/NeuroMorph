@@ -6,6 +6,10 @@
 
 #include "NeuroMorph.h"
 
+#ifdef sse
+#include <mm_malloc.h>
+#endif
+
 VECTOR_SOURCE(vector, uintptr_t)
 HASHMAP_SOURCE(adjacency_map, uintptr_t, vector, hash_i)
 VECTOR_SOURCE(vector_u64, ast_node_id)
@@ -15,7 +19,14 @@ HASHMAP_SOURCE(graph_domain, ast_node_id, uintptr_t, hash_i)
 neuromorph_node* neuromorph_input_init(size_t input_size){
 	neuromorph_node* node = neuromorph_divergent_init();
 	node->buffer_size = input_size;
+#ifdef sse
+	node->neuron_buffer = _mm_malloc(sizeof(float)*node->buffer_size, 16);
+#else
 	node->neuron_buffer = malloc(sizeof(float)*node->buffer_size);
+#endif
+	if (!node->neuron_buffer){
+		fprintf(stderr, "could not allocate memory for neuron buffer\n");
+	}
 	return node;
 }
 
@@ -55,7 +66,14 @@ neuromorph_node* neuromorph_convergent_init(void (*convergence)(const float* con
 
 neuromorph_node* neuromorph_layer_init(size_t buffer_size, void (*activation)(float* const, const size_t, const float), float parameter){
 	neuromorph_node* node = neuromorph_input_init(buffer_size);
+#ifdef sse
+	node->bias_buffer = _mm_malloc(sizeof(float)*buffer_size, 16);
+#else
 	node->bias_buffer = malloc(sizeof(float)*buffer_size);
+#endif
+	if (!node->bias_buffer){
+		fprintf(stderr, "could not allocate memory for bias buffer\n");
+	}
 	node->bias_buffer_size = buffer_size;
 	node->activation_function = activation;
 	node->activation_parameter = parameter;
@@ -72,9 +90,15 @@ neuromorph_node* neuromorph_output_init(size_t buffer_size, void (*activation)(f
 }
 
 void neuromorph_node_free(neuromorph_node* node){
+#ifdef sse
+	_mm_free(node->neuron_buffer);
+	_mm_free(node->weight_buffer);
+	_mm_free(node->bias_buffer);
+#else
 	free(node->neuron_buffer);
 	free(node->weight_buffer);
 	free(node->bias_buffer);
+#endif
 	free(node->additional_branches);
 	free(node);
 }
@@ -131,7 +155,14 @@ uint8_t neuromorph_link_destination(neuromorph_node* const source, neuromorph_no
 		else{
 			destination->weight_buffer_size = *source->previous_buffer_size*destination->buffer_size;
 		}
+#ifdef sse
+		destination->weight_buffer = _mm_malloc(sizeof(float)*destination->weight_buffer_size, 16);
+#else
 		destination->weight_buffer = malloc(sizeof(float)*destination->weight_buffer_size);
+#endif
+		if (!destination->weight_buffer){
+			fprintf(stderr, "could not allocate memory for weight buffer during link\n");
+		}
 		return 1;
 	case DIVERGENT_NODE:
 		neuromorph_information_transfer_destination_link(source, destination);
@@ -141,7 +172,14 @@ uint8_t neuromorph_link_destination(neuromorph_node* const source, neuromorph_no
 			neuromorph_information_transfer_destination_link(source, destination);
 			if (destination->neuron_buffer == NULL){
 				destination->buffer_size = *destination->previous_buffer_size;
+#ifdef sse
+				destination->neuron_buffer = _mm_malloc(sizeof(float)*destination->buffer_size, 16);
+#else
 				destination->neuron_buffer = malloc(sizeof(float)*destination->buffer_size);
+#endif
+				if (!destination->neuron_buffer){
+					fprintf(stderr, "could not allocate memory for neuron buffer during link\n");
+				}
 			}
 			return 1;
 		}
