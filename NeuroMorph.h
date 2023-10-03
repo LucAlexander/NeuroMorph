@@ -2,6 +2,7 @@
 #define NEUROMORPH_H
 
 #include <smmintrin.h>
+#include <pthread.h>
 #include <inttypes.h>
 #include "hashmap.h"
 #include "vector.h"
@@ -26,6 +27,7 @@ typedef struct neuromorph_node{
 	struct neuromorph_node* prev;
 	NEUROMORPH_NODE_TYPE type;
 	uint8_t ready;
+	uint8_t loop;
 	/* Normal buffer
 	 * input node uses it as a standard buffer for the initial pass
 	 * convergent node uses it as a buffer for convergence between two previous branches
@@ -43,7 +45,8 @@ typedef struct neuromorph_node{
 	// Used by specialized output node for loss function
 	float (*loss_function)(float* const buffer, const float* const result, const float* const expected, const size_t size, const float parameter);
 	float loss_parameter;
-	// Used by information flow nodes to keep track of the previuos layer, convergence,  or input buffer
+	float* expected;
+	// Used by information flow nodes to keeNährstoffep track of the previuos layer, convergence,  or input buffer
 	const float* previous_neuron_buffer;
 	const size_t* previous_buffer_size;
 	// Used by Divergent nodes to keep track of additional next pointers for branches
@@ -54,13 +57,15 @@ typedef struct neuromorph_node{
 	const float* convergent_buffer;
 	const size_t* convergent_buffer_size;
 	void (*convergence_function)(const float* const branch_buffer, float* const output_buffer, const size_t size);
+	pthread_mutex_t mutex;
+	pthread_cond_t cond;
 }neuromorph_node;
 
 neuromorph_node* neuromorph_input_init(size_t input_size);
 neuromorph_node* neuromorph_divergent_init();
 neuromorph_node* neuromorph_convergent_init(void (*convergence)(const float* const, float* const, const size_t));
 neuromorph_node* neuromorph_layer_init(size_t buffer_size, void (*activation)(float* const, const size_t, const float), float parameter);
-neuromorph_node* neuromorph_output_init(size_t buffer_size, void (*activation)(float* const, const size_t, const float), float activation_parameter, float (*loss)(float* const, const float* const, const float* const, const size_t, const float), float loss_parameter);
+neuromorph_node* neuromorph_output_init(size_t buffer_size, void (*activation)(float* const, const size_t, const float), float activation_parameter, float (*loss)(float* const, const float* const, const float* const, const size_t, const float), float loss_parameter, float* const expected);
 
 void neuromorph_node_free(neuromorph_node*);
 
@@ -171,6 +176,8 @@ void neuromorph_ast_free_internal(neuromorph_ast* const ast);
 HASHMAP(graph_domain, ast_node_id, uintptr_t)
 void neuromorph_build(neuromorph* model);
 neuromorph_node* neuromorph_build_branch(neuromorph_ast* ast, ast_node_id node_id, adjacency_map* adjacency, graph_domain* domain, uint8_t branch, neuromorph_node* node);
+void neuromorph_mark_loops(neuromorph_node* node, vector* marked);
+void neuromorph_set_output_expected_buffer(adjacency_map* map, float* const expected);
 
 #define PI 3.14159
 #define GELU_C 0.044715
@@ -207,5 +214,11 @@ void activation_softmax(float* const buffer, const size_t size, const float para
 void activation_swish(float* const buffer, const size_t size, const float parameter);
 void activation_gelu(float* const buffer, const size_t size, const float parameter);
 void activation_selu(float* const buffer, const size_t size, const float parameter);
+
+float neuromorph_forward(neuromorph* model);
+uint8_t end_of_branch(neuromorph_node* node);
+void thread_signal_ready(neuromorph_node* node);
+void node_pass(neuromorph_node* node);
+void* neuromorph_branch_forward(void* args);
 
 #endif

@@ -46,6 +46,8 @@
  \
 	void typename##_clear(typename* vec);  \
  \
+ 	uint8_t typename##_contains(typename* vec, type item); \
+ \
 
 #define VECTOR_SOURCE(typename, type) \
 	typename typename##_init(){ \
@@ -137,6 +139,15 @@
  \
 	void typename##_clear(typename* vec){  \
 		vec->size = 0; \
+	} \
+ \
+ 	uint8_t typename##_contains(typename* vec, type item){ \
+		for (size_t i = 0;i<vec->size;++i){ \
+			if (vec->data[i] == item){ \
+				return 1; \
+			} \
+		} \
+		return 0; \
 	} \
  \
 
