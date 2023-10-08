@@ -1,6 +1,7 @@
 #include <Python.h>
 #include <stddef.h>
 #include <stdlib.h>
+#include <time.h>
 #include <math.h>
 #include <stdio.h>
 
@@ -162,6 +163,8 @@ uint8_t neuromorph_link_destination(neuromorph_node* const source, neuromorph_no
 	case OUTPUT_NODE:
 	case LAYER_NODE:
 		destination->prev = source;
+		destination->previous_neuron_buffer = source->previous_neuron_buffer;
+		destination->previous_buffer_size = source->previous_buffer_size;
 		if (source->neuron_buffer != NULL){
 			destination->weight_buffer_size = source->buffer_size*destination->buffer_size;
 		}
@@ -175,6 +178,7 @@ uint8_t neuromorph_link_destination(neuromorph_node* const source, neuromorph_no
 #endif
 		if (!destination->weight_buffer){
 			fprintf(stderr, "could not allocate memory for weight buffer during link\n");
+			return 0;
 		}
 		return 1;
 	case DIVERGENT_NODE:
@@ -192,6 +196,7 @@ uint8_t neuromorph_link_destination(neuromorph_node* const source, neuromorph_no
 #endif
 				if (!destination->neuron_buffer){
 					fprintf(stderr, "could not allocate memory for neuron buffer during link\n");
+					return 0;
 				}
 			}
 			return 1;
@@ -207,6 +212,7 @@ uint8_t neuromorph_link_destination(neuromorph_node* const source, neuromorph_no
 		return 1;
 	case INPUT_NODE:
 	default:
+		fprintf(stderr, "attempted link to invalid node type\n");
 		return 0;
 	}
 	return 0;
@@ -222,22 +228,6 @@ void neuromorph_information_transfer_destination_link(neuromorph_node* const sou
 		destination->previous_neuron_buffer = source->previous_neuron_buffer;
 		destination->previous_buffer_size = source->previous_buffer_size;
 	}
-}
-
-void neuromorph_input(neuromorph_node* const node){
-	//TODO
-}
-
-void neuromorph_divergent(neuromorph_node* const node){
-	//TODO
-}
-
-void neuromorph_convergent(neuromorph_node* const node){
-	//TODO
-}
-
-void neuromorph_layer(neuromorph_node* const node){
-	//TODO
 }
 
 neuromorph* neuromorph_init(){
@@ -263,13 +253,116 @@ void neuromorph_free(neuromorph* model){
 	free(model);
 }
 
+uint8_t parse_header_parameter(neuromorph_header* header, float* bias_parameter, float* weight_parameter, const char* token){
+	float token_f = atof(token);
+	if (header->bias_function == NULL){
+		if (header->weight_function == NULL){
+			fprintf(stderr, "parameter passed to non existant function\n");
+			return 0;
+		}
+		*weight_parameter = token_f;
+		return 1;
+	}
+	*bias_parameter = token_f;
+	return 1;
+}
+
+uint8_t parse_header_function(neuromorph_header* header, const char* token, uint8_t arg_c){
+	function_record function_list[] = {
+		{"xavier",PARAMETRIC_WEIGHT, (GENERIC_FUNCTION_TYPE)weight_initialization_xavier},
+		{"he",PARAMETRIC_WEIGHT, (GENERIC_FUNCTION_TYPE)weight_initialization_he},
+		{"lecun",PARAMETRIC_WEIGHT, (GENERIC_FUNCTION_TYPE)weight_initialization_lecun},
+		{"uniform",PARAMETRIC_WEIGHT, (GENERIC_FUNCTION_TYPE)weight_initialization_uniform},
+		{"orthogonal",PARAMETRIC_WEIGHT, (GENERIC_FUNCTION_TYPE)weight_initialization_orthogonal},
+		{"normal",PARAMETRIC_WEIGHT, (GENERIC_FUNCTION_TYPE)weight_initialization_normal},
+		{"zero",PARAMETRIC_BIAS, (GENERIC_FUNCTION_TYPE)bias_initialization_zero},
+		{"const_flat",PARAMETRIC_BIAS, (GENERIC_FUNCTION_TYPE)bias_initialization_const_flat},
+		{"const_uneven",PARAMETRIC_BIAS, (GENERIC_FUNCTION_TYPE)bias_initialization_const_uneven}
+	};
+	switch(arg_c%3){
+	case 0:
+		for (size_t i = 0;i<PARAMETRIC_INITIALIZATION_COUNT;++i){
+			function_record func = function_list[i];
+			if (strcmp(token, func.name)){
+				continue;
+			}
+			if (function_list[i].type == PARAMETRIC_WEIGHT){
+				header->weight_function = (WEIGHT_TYPE)func.function;
+				return 1;
+			}
+			header->bias_function = (BIAS_TYPE)func.function;
+			return 1;
+		}
+		fprintf(stderr, "no valid function %s\n", token);
+		return 0;
+	case 1:
+		printf("a:");
+		if (!parse_header_parameter(header, &header->bias_parameter_a, &header->weight_parameter_a, token)){
+			fprintf(stderr, "initialization arg parse error\n");
+			return 0;
+		}
+		return 1;
+	case 2:
+		printf("b:");
+		if (!parse_header_parameter(header, &header->bias_parameter_b, &header->weight_parameter_b, token)){
+			fprintf(stderr, "initialization arg parse error\n");
+			return 0;
+		}
+		return 1;
+	}
+	fprintf(stderr, "%u mod 3 = %u\n", arg_c, arg_c%3);
+	return 0;
+}
+
+neuromorph_header compile_header(const char** c){
+	neuromorph_header header = {NULL, NULL, 0, 0, 0, 0};
+	char token[NODE_NAME_TOKEN_MAX];
+	size_t index = 0;
+	uint8_t subarg_c = 0;
+	for ((*c)++;**c!='/';++(*c)){
+		if (**c != ' ' && **c != ',' && index != NODE_NAME_TOKEN_MAX-1){
+			token[index++] = **c;
+			continue;
+		}
+		token[index] = '\0';
+		index = 0;
+		if (!parse_header_function(&header, token, subarg_c)){
+			fprintf(stderr, "header arg parse error\n");
+		}
+		if (**c == ' '){
+			subarg_c++;
+		}
+		else if (**c == ','){
+			subarg_c = 0;
+		}
+	}
+	token[index] = '\0';
+	if (!parse_header_function(&header, token, subarg_c)){
+		fprintf(stderr, "header arg parse error\n");
+	}
+	(*c)++;
+	return header;
+}
+
 neuromorph* neuromorph_compile(const char* const description){
-	neuromorph_ast ast = neuromorph_ast_init();
-	if (*description != '('){
-		fprintf(stderr, "Model must start with input node as layer denored by (args)\n, found unexpected token: %c", *description);
+	const char* c = description;
+	if (*c != '/'){
+		fprintf(stderr, "missing header\n");
 		return NULL;
 	}
-	const char* c = description;
+	neuromorph_header header = compile_header(&c);
+	if (!header.bias_function || !header.weight_function){
+		fprintf(stderr, "missing initialization funtion\n");
+		return NULL;
+	}
+	neuromorph_ast ast = neuromorph_ast_init();
+	while (*c != '('){
+		if (*c == '\0'){
+			fprintf(stderr, "Model must start with input node as layer denored by (args)\n, found unexpected token: %c", *description);
+			return NULL;
+		}
+		c++;
+	}
 	ast_node_id id;
 	ast_node_id prev = -1;
 	ast_node_id root = -1;
@@ -295,6 +388,7 @@ neuromorph* neuromorph_compile(const char* const description){
 	neuromorph* model = neuromorph_init();
 	model->ast = ast;
 	model->ast_root = root;
+	model->header = header;
 	return model;
 }
 
@@ -371,7 +465,15 @@ uint8_t neuromorph_ast_set_next_id(neuromorph_ast* ast, ast_node_id id, ast_node
 		fprintf(stderr, "previous node with passed id does not exist\n");
 		return 0;
 	}
-	node->next = next;
+	if (node->next==-1){
+		node->next = next;
+		return 1;
+	}
+	if (node->type != NEUROMORPH_DIVERGENCE_ARGS){
+		fprintf(stderr, "converging non divergent node with preexisting next\n");
+		return 0;
+	}
+	neuromorph_divergence_arg_parse(node, 0, next);
 	return 1;
 }
 
@@ -524,7 +626,7 @@ uint8_t neuromorph_parse_segment(neuromorph_ast* ast, const char** c, char type,
 	*top_level_id = id;
 	if ((!first) && prev != -1){
 		if (!neuromorph_ast_set_next_id(ast, prev, id)){
-			fprintf(stderr, "next reference unable to be set");
+			fprintf(stderr, "next reference unable to be set\n");
 			return 0;
 		}
 	}
@@ -780,7 +882,8 @@ void neuromorph_build(neuromorph* model){
 	vector marked = vector_init();
 	neuromorph_mark_loops(model->input, &marked);
 	vector_free(&marked);
-	neuromorph_set_output_expected_buffer(&model->adjacency, model->input->expected);
+	model->output = neuromorph_set_output_expected_buffer(&model->adjacency, model->input->expected);
+	weight_bias_initialize(model);
 }
 
 neuromorph_node* neuromorph_build_branch(neuromorph_ast* ast, ast_node_id node_id, adjacency_map* adjacency, graph_domain* domain, uint8_t branch, neuromorph_node* node){
@@ -860,24 +963,20 @@ neuromorph_node* neuromorph_build_branch(neuromorph_ast* ast, ast_node_id node_i
 	return initial;
 }
 
-void neuromorph_set_output_expected_buffer(adjacency_map* map, float* const expected){
+neuromorph_node* neuromorph_set_output_expected_buffer(adjacency_map* map, float* const expected){
 	adjacency_map_iterator it = adjacency_map_iterator_init(map);
 	while (adjacency_map_iterator_has_next(&it)){
 		adjacency_map_result res = adjacency_map_iterator_next(&it);
 		vector nodes = res.val; 
-		if (nodes.size == 0){
-			neuromorph_node* output = (neuromorph_node*)res.key;
-			output->expected = expected;
-			return;
-		}
 		for (size_t i = 0;i<nodes.size;++i){
 			neuromorph_node* candidate = (neuromorph_node*)nodes.data[i];
-			if (candidate->type == CONVERGENT_NODE){
+			if (candidate->type == OUTPUT_NODE){
 				candidate->expected = expected;
-				return;
+				return candidate;
 			}
 		}
 	}
+	return NULL;
 }
 
 /*
@@ -1362,7 +1461,7 @@ void activation_swish(float* const buffer, const size_t size, const float parame
 
 void activation_gelu(float* const buffer, const size_t size, const float parameter){
 	size_t i;
-	const float s2p = sqrtf(2.0f)/PI;
+	const float s2p = sqrtf(2.0f)/M_PI;
 	const __m128 half = _mm_set1_ps(0.5f);
 	const __m128 one = _mm_set1_ps(1.0f);
 	const __m128 sqrt2vpi = _mm_set1_ps(s2p);
@@ -1564,7 +1663,7 @@ void activation_swish(float* const buffer, const size_t size, const float parame
 
 void activation_gelu(float* const buffer, const size_t size, const float parameter){
 	float x;
-	const float s2p  = sqrtf(2/PI);
+	const float s2p  = sqrtf(2/M_PI);
 	for (size_t i = 0;i<size;++i){
 		x = buffer[i];
 		buffer[i] = 0.5*x*(1+tanh(s2p*(x+(GELU_C*pow(x,3)))));
@@ -1605,10 +1704,7 @@ float neuromorph_forward(neuromorph* model){
 }
 
 uint8_t end_of_branch(neuromorph_node* node){
-	if (node->next->type != CONVERGENT_NODE){
-		return 0;
-	}
-	return node->next->prev != node;
+	return node->next->type == CONVERGENT_NODE && (node->next->prev != node);
 }
 
 void thread_signal_ready(neuromorph_node* node){
@@ -1752,13 +1848,94 @@ void* neuromorph_branch_forward(void* args){
 	return NULL;
 }
 
+void set_seed(time_t seed){
+	//TODO make sure the seed is saved if a custom seed is not used
+	//time_t seed = time(NULL);
+	srandom(seed);
+}
+
+float uniform_distribution(float min, float max){
+	float n = ((float)random())/RAND_MAX;
+	return (n*(max-min))+min;
+}
+
+float normal_distribution(float mean, float std){
+	float u1 = uniform_distribution(0, 1);
+	float u2 = uniform_distribution(0, 1);
+	float z0 = sqrtf(-2.8*logf(u1))*cos(2.0*M_PI*u2);
+	return mean+std*z0;
+}
+
+void bias_initialization_zero(float* const buffer, const size_t size, const float a, const float b){
+	memset(buffer, 0, size*sizeof(float));
+}
+
+void bias_initialization_const_flat(float* const buffer, const size_t size, const float a, const float b){
+	memset(buffer, a, size*sizeof(float));
+}
+
+void bias_initialization_const_uneven(float* const buffer, const size_t size, const float a, const float b){
+	for (size_t i = 0;i<size;++i){
+		buffer[i] = normal_distribution(a, b);
+	}
+}
+
+void weight_initialization_xavier(float* const out, const size_t in_size, const size_t out_size, const float aa, const float b){
+	float a = sqrtf(1/(in_size+out_size));
+	for (size_t i = 0;i<in_size*out_size;++i){
+		out[i] = uniform_distribution(-a, a);
+	}
+}
+
+void weight_initialization_he(float* const out, const size_t in_size, const size_t out_size, const float aa, const float b){
+	float a = sqrtf(6/in_size);
+	for (size_t i = 0;i<in_size*out_size;++i){
+		out[i] = uniform_distribution(-a, a);
+	}
+}
+
+void weight_initialization_lecun(float* const out, const size_t in_size, const size_t out_size, const float a, const float b){
+	float std = sqrtf(1/in_size);
+	for (size_t i = 0;i<in_size*out_size;++i){
+		out[i] = normal_distribution(0, std);
+	}
+}
+
+void weight_initialization_uniform(float* const out, const size_t in_size, const size_t out_size, const float a, const float b){
+	for (size_t i = 0;i<in_size*out_size;++i){
+		out[i] = uniform_distribution(a, b);
+	}
+}
+
+void weight_initialization_orthogonal(float* const out, const size_t in_size, const size_t out_size, const float a, const float b){
+	//TODO gotta figure out a way to do this without lapacke
+}
+
+void weight_initialization_normal(float* const out, const size_t in_size, const size_t out_size, const float a, const float b){
+	for (size_t i = 0;i<in_size*out_size;++i){
+		out[i] = normal_distribution(a, b);
+	}
+}
+
+void weight_bias_initialize(neuromorph* model){
+	adjacency_map_iterator it = adjacency_map_iterator_init(&model->adjacency);
+	while (adjacency_map_iterator_has_next(&it)){
+		neuromorph_node* node = (neuromorph_node*)adjacency_map_iterator_next(&it).key;
+		if (node->type == LAYER_NODE){
+			model->header.weight_function(node->weight_buffer, *node->previous_buffer_size, node->buffer_size, model->header.weight_parameter_a, model->header.weight_parameter_b);
+			model->header.bias_function(node->bias_buffer, node->bias_buffer_size, model->header.bias_parameter_a, model->header.bias_parameter_b);
+		}
+	}
+	model->header.weight_function(model->output->weight_buffer, *model->output->previous_buffer_size, model->output->buffer_size, model->header.weight_parameter_a, model->header.weight_parameter_b);
+	model->header.bias_function(model->output->bias_buffer, model->output->bias_buffer_size, model->header.bias_parameter_a, model->header.bias_parameter_b);
+}
+
 //TODO forward pass in batches in epochs in training
 //single pass function call for final trained models
 //validation as part of training process
 //dataset processing assumed done in python so that we can just be passed direct input vectors
 //gradient calculation
 //back propogation throuogh time
-//parallelization with pthreads
 //I dont want to add support for non posix threading, if youre doing ml on windows what are you doing with your life bro
 //simplify to matrix for locality optimization
 

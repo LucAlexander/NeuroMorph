@@ -23,7 +23,7 @@ compile_options = {
     "sse4_1":"-msse4.1"
 }
 
-module = Extension('neuromorph',sources=['NeuroMorph.c', 'hashmap.c'], extra_compile_args=['-lpthread']+[option for version, option in compile_options.items() if version in simd_version],define_macros=[(token, "1") for token in simd_version])
+module = Extension('neuromorph',sources=['NeuroMorph.c', 'hashmap.c'], extra_compile_args=['-lpthread','-lm']+[option for version, option in compile_options.items() if version in simd_version],define_macros=[(token, "1") for token in simd_version])
 
 setup(
     name="NeuroMorph",

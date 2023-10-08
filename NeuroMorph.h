@@ -46,7 +46,7 @@ typedef struct neuromorph_node{
 	float (*loss_function)(float* const buffer, const float* const result, const float* const expected, const size_t size, const float parameter);
 	float loss_parameter;
 	float* expected;
-	// Used by information flow nodes to keeNährstoffep track of the previuos layer, convergence,  or input buffer
+	// Used by information flow nodes to keep track of the previuos layer, convergence,  or input buffer
 	const float* previous_neuron_buffer;
 	const size_t* previous_buffer_size;
 	// Used by Divergent nodes to keep track of additional next pointers for branches
@@ -73,11 +73,6 @@ void neuromorph_link(adjacency_map* adjacency, neuromorph_node* const source, ne
 uint8_t neuromorph_link_source(neuromorph_node* const source, neuromorph_node* const destination);
 uint8_t neuromorph_link_destination(neuromorph_node* const source, neuromorph_node* const destination);
 void neuromorph_information_transfer_destination_link(neuromorph_node* const source, neuromorph_node* const destination);
-
-void neuromorph_input(neuromorph_node* const node);
-void neuromorph_divergent(neuromorph_node* const node);
-void neuromorph_convergent(neuromorph_node* const node);
-void neuromorph_layer(neuromorph_node* const node);
 
 typedef int64_t ast_node_id;
 VECTOR(vector_u64, ast_node_id)
@@ -121,11 +116,25 @@ typedef struct neuromorph_ast_node{
 
 HASHMAP(neuromorph_ast, ast_node_id, neuromorph_ast_node)
 
+#define BIAS_TYPE void (*)(float* const, const size_t, const float, const float)
+#define WEIGHT_TYPE void (*)(float* const, const size_t, const size_t, const float, const float)
+
+typedef struct neuromorph_header{
+	void (*bias_function)(float* const, const size_t, const float, const float);
+	void (*weight_function)(float* const, const size_t, const size_t, const float, const float);
+	float bias_parameter_a;
+	float bias_parameter_b;
+	float weight_parameter_a;
+	float weight_parameter_b;
+}neuromorph_header;
+
 typedef struct neuromorph{
 	ast_node_id ast_root;
 	neuromorph_ast ast;
+	neuromorph_header header;
 	adjacency_map adjacency;
 	neuromorph_node* input;
+	neuromorph_node* output;
 }neuromorph;
 
 neuromorph* neuromorph_init();
@@ -136,7 +145,9 @@ void adjacency_map_free_internal(adjacency_map* adjacency);
 
 typedef enum PARAMETRIC_FUNCTION_TYPE{
 	PARAMETRIC_ACTIVATION,
-	PARAMETRIC_LOSS
+	PARAMETRIC_LOSS,
+	PARAMETRIC_WEIGHT,
+	PARAMETRIC_BIAS
 }PARAMETRIC_FUNCTION_TYPE;
 
 typedef union parametric_function_data{
@@ -177,9 +188,8 @@ HASHMAP(graph_domain, ast_node_id, uintptr_t)
 void neuromorph_build(neuromorph* model);
 neuromorph_node* neuromorph_build_branch(neuromorph_ast* ast, ast_node_id node_id, adjacency_map* adjacency, graph_domain* domain, uint8_t branch, neuromorph_node* node);
 void neuromorph_mark_loops(neuromorph_node* node, vector* marked);
-void neuromorph_set_output_expected_buffer(adjacency_map* map, float* const expected);
+neuromorph_node* neuromorph_set_output_expected_buffer(adjacency_map* map, float* const expected);
 
-#define PI 3.14159
 #define GELU_C 0.044715
 
 void convergence_multiplicative(const float* const path, float* const buffer, const size_t buffer_size);
@@ -220,5 +230,27 @@ uint8_t end_of_branch(neuromorph_node* node);
 void thread_signal_ready(neuromorph_node* node);
 void node_pass(neuromorph_node* node);
 void* neuromorph_branch_forward(void* args);
+
+void set_seed(time_t seed);
+float uniform_distribution(float min, float max);
+float normal_distribution(float mean, float std);
+
+#define PARAMETRIC_INITIALIZATION_COUNT 9
+
+void bias_initialization_zero(float* const buffer, const size_t size, const float a, const float b);
+void bias_initialization_const_flat(float* const buffer, const size_t size, const float a, const float b);
+void bias_initialization_const_uneven(float* const buffer, const size_t size, const float a, const float b);
+
+void weight_initialization_xavier(float* const out, const size_t in_size, const size_t out_size, const float a, const float b);
+void weight_initialization_he(float* const out, const size_t in_size, const size_t out_size, const float a, const float b);
+void weight_initialization_lecun(float* const out, const size_t in_size, const size_t out_size, const float a, const float b);
+void weight_initialization_uniform(float* const out, const size_t in_size, const size_t out_size, const float a, const float b);
+void weight_initialization_orthogonal(float* const out, const size_t in_size, const size_t out_size, const float a, const float b);
+void weight_initialization_normal(float* const out, const size_t in_size, const size_t out_size, const float a, const float b);
+
+void weight_bias_initialize(neuromorph* model);
+neuromorph_header compile_header(const char** c);
+uint8_t parse_header_function(neuromorph_header* header, const char* token, uint8_t arg_c);
+uint8_t parse_header_parameter(neuromorph_header* header, float* bias_parameter, float* weight_parameter, const char* token);
 
 #endif
