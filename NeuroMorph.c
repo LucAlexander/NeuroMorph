@@ -11,6 +11,18 @@
 #include <mm_malloc.h>
 #endif
 
+//TODO figure out why the previous state of things is not preserved losslessly between passes
+//TODO test on larger more complicated network
+//	forward link
+//	backward link
+//	intermediate standby link to middle of another branch
+//TODO the situation where a loop point depends on a future point of its convergence. the convergence may merge after its previous is already updated, rather than before
+void print_buffer(const float* const buffer, const size_t size, const char* end){
+	printf("[");
+	for (size_t i = 0;i<size;++i) printf("%f ",buffer[i]);
+	printf("]%s",end);
+}
+
 VECTOR_SOURCE(vector, uintptr_t)
 HASHMAP_SOURCE(adjacency_map, uintptr_t, vector, hash_i)
 VECTOR_SOURCE(vector_u64, ast_node_id)
@@ -63,7 +75,7 @@ neuromorph_node* neuromorph_divergent_init(){
 	return node;
 }
 
-neuromorph_node* neuromorph_convergent_init(void (*convergence)(const float* const, float* const, const size_t)){
+neuromorph_node* neuromorph_convergent_init(void (*convergence)(const float* const, const float* const, float* const, const size_t)){
 	neuromorph_node* node = neuromorph_divergent_init();
 	node->convergence_function = convergence;
 	node->type = CONVERGENT_NODE;
@@ -168,11 +180,11 @@ uint8_t neuromorph_link_destination(neuromorph_node* const source, neuromorph_no
 		destination->prev = source;
 		destination->previous_neuron_buffer = source->previous_neuron_buffer;
 		destination->previous_buffer_size = source->previous_buffer_size;
+		destination->weight_buffer_size = *source->previous_buffer_size*destination->buffer_size;
 		if (source->neuron_buffer != NULL){
+			destination->previous_neuron_buffer = source->neuron_buffer;
+			destination->previous_buffer_size = &source->buffer_size;
 			destination->weight_buffer_size = source->buffer_size*destination->buffer_size;
-		}
-		else{
-			destination->weight_buffer_size = *source->previous_buffer_size*destination->buffer_size;
 		}
 #ifdef nm_sse
 		destination->weight_buffer = _mm_malloc(sizeof(float)*destination->weight_buffer_size, 16);
@@ -1039,44 +1051,44 @@ Summarized Strategy:
 //look into data prefetching when simulation is done
 //more efficient approximations of complex functions
 #if defined(nm_sse)
-void convergence_multiplicative(const float* const path, float* const buffer, const size_t buffer_size){
+void convergence_multiplicative(const float* const path, const float* const previous, float* const buffer, const size_t buffer_size){
 	size_t i;
 	for (i = 0;i+4<=buffer_size;i+=4){
 		__m128 p = _mm_load_ps(path+i);
-		__m128 b = _mm_load_ps(buffer+i);
+		__m128 b = _mm_load_ps(previous+i);
 		__m128 result = _mm_mul_ps(p, b);
 		_mm_store_ps(buffer+i, result);
 	}
 	for (;i<buffer_size;++i){
-		buffer[i] *= path[i];
+		buffer[i] = previous[i] * path[i];
 	}
 }
 
-void convergence_additive(const float* const path, float* const buffer, const size_t buffer_size){
+void convergence_additive(const float* const path, const float* const previous, float* const buffer, const size_t buffer_size){
 	size_t i;
 	for(i = 0;i+4<=buffer_size;i+=4){
 		__m128 p = _mm_load_ps(path+i);
-		__m128 b = _mm_load_ps(buffer+i);
+		__m128 b = _mm_load_ps(previous+i);
 		__m128 result = _mm_add_ps(p, b);
 		_mm_store_ps(buffer + i, result);
 	}
 	for (;i<buffer_size;++i){
-		buffer[i] += path[i];
+		buffer[i] = previous[i] + path[i];
 	}
 }
 
-void convergence_average(const float* const path, float* const buffer, const size_t buffer_size){
+void convergence_average(const float* const path, const float* const previous, float* const buffer, const size_t buffer_size){
 	size_t i;
 	__m128 two = _mm_set1_ps(2.0f);
 	for (i = 0;i+4<=buffer_size;i+=4){
 		__m128 p = _mm_load_ps(path+i);
-		__m128 b = _mm_load_ps(buffer+i);
+		__m128 b = _mm_load_ps(previous+i);
 		__m128 s = _mm_add_ps(p, b);
 		__m128 avg = _mm_div_ps(s, two);
 		_mm_store_ps(buffer+i, avg);
 	}
 	for (;i<buffer_size;++i){
-		buffer[i] = (buffer[i]+path[i])/2;
+		buffer[i] = (previous[i]+path[i])/2;
 	}
 }
 
@@ -1490,21 +1502,21 @@ void activation_selu(float* const buffer, const size_t size, const float paramet
 }
 
 #else
-void convergence_multiplicative(const float* const path, float* const buffer, const size_t buffer_size){
+void convergence_multiplicative(const float* const path, const float* const previous, float* const buffer, const size_t buffer_size){
 	for (size_t i = 0;i<buffer_size;++i){
-		buffer[i] *= path[i];
+		buffer[i] = previous[i] * path[i];
 	}
 }
 
-void convergence_additive(const float* const path, float* const buffer, const size_t buffer_size){
+void convergence_additive(const float* const path, const float* const previous, float* const buffer, const size_t buffer_size){
 	for (size_t i = 0;i<buffer_size;++i){
-		buffer[i] += path[i];
+		buffer[i] = previous[i]+path[i];
 	}
 }
 
-void convergence_average(const float* const path, float* const buffer, const size_t buffer_size){
+void convergence_average(const float* const path, const float* const previous, float* const buffer, const size_t buffer_size){
 	for (size_t i = 0;i<buffer_size;++i){
-		buffer[i] = (buffer[i]+path[i])/2;
+		buffer[i] = (previous[i]+path[i])/2;
 	}
 }
 
@@ -1726,6 +1738,8 @@ void thread_signal_ready(neuromorph_node* node){
 
 void node_pass(neuromorph_node* node){
 	size_t i, k;
+	print_buffer(node->previous_neuron_buffer, *node->previous_buffer_size, "#");
+	print_buffer(node->neuron_buffer, node->buffer_size, "->");
 #ifdef nm_sse
 	__m128 wsum;
 	__m128 bias;
@@ -1771,6 +1785,7 @@ void node_pass(neuromorph_node* node){
 		node->neuron_buffer[i] = node->bias_buffer[i] + wsum;
 	}
 #endif
+	print_buffer(node->neuron_buffer, node->buffer_size, "\n");
 }
 
 void* neuromorph_branch_forward(void* args){
@@ -1846,8 +1861,10 @@ void* neuromorph_branch_forward(void* args){
 			}
 			if (node->convergent_node->ready){
 				pthread_mutex_lock(&node->mutex);
-				printf("merge :)\n");
-				node->convergence_function(node->convergent_buffer, node->neuron_buffer, node->buffer_size);
+				print_buffer(node->previous_neuron_buffer, node->buffer_size, "x");
+				print_buffer(node->convergent_buffer, node->buffer_size, "->");
+				node->convergence_function(node->convergent_buffer, node->previous_neuron_buffer, node->neuron_buffer, node->buffer_size);
+				print_buffer(node->neuron_buffer, node->buffer_size, "\n");
 				pthread_mutex_unlock(&node->mutex);
 			}
 			if (!node->convergent_node->loop){

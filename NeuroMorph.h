@@ -59,14 +59,14 @@ typedef struct neuromorph_node{
 	struct neuromorph_node* convergent_node;
 	const float* convergent_buffer;
 	const size_t* convergent_buffer_size;
-	void (*convergence_function)(const float* const branch_buffer, float* const output_buffer, const size_t size);
+	void (*convergence_function)(const float* const branch_buffer, const float* const previous, float* const output_buffer, const size_t size);
 	pthread_mutex_t mutex;
 	pthread_cond_t cond;
 }neuromorph_node;
 
 neuromorph_node* neuromorph_input_init(size_t input_size);
 neuromorph_node* neuromorph_divergent_init();
-neuromorph_node* neuromorph_convergent_init(void (*convergence)(const float* const, float* const, const size_t));
+neuromorph_node* neuromorph_convergent_init(void (*convergence)(const float* const, const float* const, float* const, const size_t));
 neuromorph_node* neuromorph_layer_init(size_t buffer_size, void (*activation)(float* const, const size_t, const float), float parameter);
 neuromorph_node* neuromorph_output_init(size_t buffer_size, void (*activation)(float* const, const size_t, const float), float activation_parameter, float (*loss)(float* const, const float* const, const float* const, const size_t, const float), float loss_parameter);
 
@@ -96,7 +96,7 @@ typedef struct neuromorph_divergence_args{
 
 typedef struct neuromorph_convergence_args{
 	ast_node_id path;
-	void (*convergence_function)(const float* const, float* const, const size_t);
+	void (*convergence_function)(const float* const, const float* const, float* const, const size_t);
 }neuromorph_convergence_args;
 
 typedef enum NEUROMORPH_AST_NODE_TYPE{
@@ -195,9 +195,9 @@ neuromorph_node* neuromorph_pull_output(adjacency_map* map);
 
 #define GELU_C 0.044715
 
-void convergence_multiplicative(const float* const path, float* const buffer, const size_t buffer_size);
-void convergence_additive(const float* const path, float* const buffer, const size_t buffer_size);
-void convergence_average(const float* const path, float* const buffer, const size_t buffer_size);
+void convergence_multiplicative(const float* const path, const float* const previous, float* const buffer, const size_t buffer_size);
+void convergence_additive(const float* const path, const float* const previous, float* const buffer, const size_t buffer_size);
+void convergence_average(const float* const path, const float* const previous, float* const buffer, const size_t buffer_size);
 //TODO concatenation, attention, weight, billinear matrix?
 
 #define PARAMETRIC_FUNCTION_COUNT 18
