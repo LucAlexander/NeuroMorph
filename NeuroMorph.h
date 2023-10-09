@@ -1,6 +1,9 @@
 #ifndef NEUROMORPH_H
 #define NEUROMORPH_H
 
+#ifdef nm_fma
+#include <immintrin.h>
+#endif
 #include <smmintrin.h>
 #include <pthread.h>
 #include <inttypes.h>
@@ -65,7 +68,7 @@ neuromorph_node* neuromorph_input_init(size_t input_size);
 neuromorph_node* neuromorph_divergent_init();
 neuromorph_node* neuromorph_convergent_init(void (*convergence)(const float* const, float* const, const size_t));
 neuromorph_node* neuromorph_layer_init(size_t buffer_size, void (*activation)(float* const, const size_t, const float), float parameter);
-neuromorph_node* neuromorph_output_init(size_t buffer_size, void (*activation)(float* const, const size_t, const float), float activation_parameter, float (*loss)(float* const, const float* const, const float* const, const size_t, const float), float loss_parameter, float* const expected);
+neuromorph_node* neuromorph_output_init(size_t buffer_size, void (*activation)(float* const, const size_t, const float), float activation_parameter, float (*loss)(float* const, const float* const, const float* const, const size_t, const float), float loss_parameter);
 
 void neuromorph_node_free(neuromorph_node*);
 
@@ -188,7 +191,7 @@ HASHMAP(graph_domain, ast_node_id, uintptr_t)
 void neuromorph_build(neuromorph* model);
 neuromorph_node* neuromorph_build_branch(neuromorph_ast* ast, ast_node_id node_id, adjacency_map* adjacency, graph_domain* domain, uint8_t branch, neuromorph_node* node);
 void neuromorph_mark_loops(neuromorph_node* node, vector* marked);
-neuromorph_node* neuromorph_set_output_expected_buffer(adjacency_map* map, float* const expected);
+neuromorph_node* neuromorph_pull_output(adjacency_map* map);
 
 #define GELU_C 0.044715
 
@@ -207,7 +210,7 @@ float loss_huber_modified(float* const buffer, const float* const result, const 
 float loss_cross_entropy(float* const buffer, const float* const result, const float* const expected, const size_t size, const float parameter);
 float loss_hinge(float* const buffer, const float* const result, const float* const expected, const size_t size, const float parameter);
 
-#ifdef sse
+#ifdef nm_sse
 __m128 exp_neg_ps(__m128 x);
 __m128 tanh_ps(__m128 x);
 #endif

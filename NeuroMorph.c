@@ -7,7 +7,7 @@
 
 #include "NeuroMorph.h"
 
-#ifdef sse
+#ifdef nm_sse
 #include <mm_malloc.h>
 #endif
 
@@ -19,13 +19,12 @@ HASHMAP_SOURCE(graph_domain, ast_node_id, uintptr_t, hash_i)
 
 neuromorph_node* neuromorph_input_init(size_t input_size){
 	neuromorph_node* node = neuromorph_divergent_init();
+	node->type = INPUT_NODE;
 	node->buffer_size = input_size;
-#ifdef sse
+#ifdef nm_sse
 	node->neuron_buffer = _mm_malloc(sizeof(float)*node->buffer_size, 16);
-	node->expected = _mm_malloc(sizeof(float)*node->buffer_size, 16);
 #else
 	node->neuron_buffer = malloc(sizeof(float)*node->buffer_size);
-	node->expected = malloc(sizeof(float)*buffer_size);
 #endif
 	if (!node->neuron_buffer){
 		fprintf(stderr, "could not allocate memory for neuron buffer\n");
@@ -73,7 +72,7 @@ neuromorph_node* neuromorph_convergent_init(void (*convergence)(const float* con
 
 neuromorph_node* neuromorph_layer_init(size_t buffer_size, void (*activation)(float* const, const size_t, const float), float parameter){
 	neuromorph_node* node = neuromorph_input_init(buffer_size);
-#ifdef sse
+#ifdef nm_sse
 	node->bias_buffer = _mm_malloc(sizeof(float)*buffer_size, 16);
 #else
 	node->bias_buffer = malloc(sizeof(float)*buffer_size);
@@ -88,17 +87,21 @@ neuromorph_node* neuromorph_layer_init(size_t buffer_size, void (*activation)(fl
 	return node;
 }
 
-neuromorph_node* neuromorph_output_init(size_t buffer_size, void (*activation)(float* const, const size_t, const float), float activation_parameter, float (*loss)(float* const, const float* const, const float* const, const size_t, const float), float loss_parameter, float* const expected){
+neuromorph_node* neuromorph_output_init(size_t buffer_size, void (*activation)(float* const, const size_t, const float), float activation_parameter, float (*loss)(float* const, const float* const, const float* const, const size_t, const float), float loss_parameter){
 	neuromorph_node* node = neuromorph_layer_init(buffer_size, activation, activation_parameter);
 	node->loss_function = loss;
 	node->loss_parameter = loss_parameter;
-	node->expected = expected;
 	node->type = OUTPUT_NODE;
+#ifdef nm_sse
+	node->expected = _mm_malloc(sizeof(float)*node->buffer_size, 16);
+#else
+	node->expected = malloc(sizeof(float)*node->buffer_size);
+#endif
 	return node;
 }
 
 void neuromorph_node_free(neuromorph_node* node){
-#ifdef sse
+#ifdef nm_sse
 	_mm_free(node->neuron_buffer);
 	_mm_free(node->weight_buffer);
 	_mm_free(node->bias_buffer);
@@ -171,7 +174,7 @@ uint8_t neuromorph_link_destination(neuromorph_node* const source, neuromorph_no
 		else{
 			destination->weight_buffer_size = *source->previous_buffer_size*destination->buffer_size;
 		}
-#ifdef sse
+#ifdef nm_sse
 		destination->weight_buffer = _mm_malloc(sizeof(float)*destination->weight_buffer_size, 16);
 #else
 		destination->weight_buffer = malloc(sizeof(float)*destination->weight_buffer_size);
@@ -189,7 +192,7 @@ uint8_t neuromorph_link_destination(neuromorph_node* const source, neuromorph_no
 			neuromorph_information_transfer_destination_link(source, destination);
 			if (destination->neuron_buffer == NULL){
 				destination->buffer_size = *destination->previous_buffer_size;
-#ifdef sse
+#ifdef nm_sse
 				destination->neuron_buffer = _mm_malloc(sizeof(float)*destination->buffer_size, 16);
 #else
 				destination->neuron_buffer = malloc(sizeof(float)*destination->buffer_size);
@@ -219,7 +222,7 @@ uint8_t neuromorph_link_destination(neuromorph_node* const source, neuromorph_no
 }
 
 void neuromorph_information_transfer_destination_link(neuromorph_node* const source, neuromorph_node* const destination){
-	destination->prev = source->prev;
+	destination->prev = source;
 	if (source->neuron_buffer != NULL){
 		destination->previous_neuron_buffer = source->neuron_buffer;
 		destination->previous_buffer_size = &source->buffer_size;
@@ -296,14 +299,12 @@ uint8_t parse_header_function(neuromorph_header* header, const char* token, uint
 		fprintf(stderr, "no valid function %s\n", token);
 		return 0;
 	case 1:
-		printf("a:");
 		if (!parse_header_parameter(header, &header->bias_parameter_a, &header->weight_parameter_a, token)){
 			fprintf(stderr, "initialization arg parse error\n");
 			return 0;
 		}
 		return 1;
 	case 2:
-		printf("b:");
 		if (!parse_header_parameter(header, &header->bias_parameter_b, &header->weight_parameter_b, token)){
 			fprintf(stderr, "initialization arg parse error\n");
 			return 0;
@@ -882,13 +883,15 @@ void neuromorph_build(neuromorph* model){
 	vector marked = vector_init();
 	neuromorph_mark_loops(model->input, &marked);
 	vector_free(&marked);
-	model->output = neuromorph_set_output_expected_buffer(&model->adjacency, model->input->expected);
+	model->output = neuromorph_pull_output(&model->adjacency);
 	weight_bias_initialize(model);
 }
 
 neuromorph_node* neuromorph_build_branch(neuromorph_ast* ast, ast_node_id node_id, adjacency_map* adjacency, graph_domain* domain, uint8_t branch, neuromorph_node* node){
 	neuromorph_node* initial = NULL;
 	uint8_t first = 1;
+	vector stale_links = vector_init();
+	neuromorph_node* leftover = NULL;
 	while (node_id != -1){
 		neuromorph_ast_node* ast_node = neuromorph_ast_ref(ast, node_id);
 		neuromorph_node* current_node = NULL;
@@ -911,7 +914,7 @@ neuromorph_node* neuromorph_build_branch(neuromorph_ast* ast, ast_node_id node_i
 				node = link;
 			}
 			if (ast_node->next == -1){
-				current_node = neuromorph_output_init(ast_node->data.layer.layer_size, ast_node->data.layer.activation_function, ast_node->data.layer.activation_parameter, ast_node->data.layer.loss_function, ast_node->data.layer.loss_parameter, NULL);
+				current_node = neuromorph_output_init(ast_node->data.layer.layer_size, ast_node->data.layer.activation_function, ast_node->data.layer.activation_parameter, ast_node->data.layer.loss_function, ast_node->data.layer.loss_parameter);
 				break;
 			}
 			current_node = neuromorph_layer_init(ast_node->data.layer.layer_size, ast_node->data.layer.activation_function, ast_node->data.layer.activation_parameter);
@@ -941,9 +944,19 @@ neuromorph_node* neuromorph_build_branch(neuromorph_ast* ast, ast_node_id node_i
 				uintptr_t* branch_ptr = graph_domain_ref(domain, candidate);
 				if (branch_ptr == NULL){
 					neuromorph_build_branch(ast, candidate, adjacency, domain, 1, current_node);
+					continue;
 				}
+				vector_push(&stale_links, *branch_ptr);
+				leftover = current_node;
 			}
 			break;
+		}
+		if (leftover != NULL){
+			for (size_t stale = 0;stale<stale_links.size;++stale){
+				neuromorph_link(adjacency, leftover, (neuromorph_node*)stale_links.data[stale]);
+			}
+			vector_clear(&stale_links);
+			leftover = NULL;
 		}
 		if (node != NULL){
 			neuromorph_link(adjacency, node, current_node);
@@ -956,14 +969,16 @@ neuromorph_node* neuromorph_build_branch(neuromorph_ast* ast, ast_node_id node_i
 			if (next_node_ptr != NULL){
 				neuromorph_node* next_node = (neuromorph_node*)(*next_node_ptr);
 				neuromorph_link(adjacency, current_node, next_node);
+				vector_free(&stale_links);
 				return initial;
 			}
 		}	
 	}
+	vector_free(&stale_links);
 	return initial;
 }
 
-neuromorph_node* neuromorph_set_output_expected_buffer(adjacency_map* map, float* const expected){
+neuromorph_node* neuromorph_pull_output(adjacency_map* map){
 	adjacency_map_iterator it = adjacency_map_iterator_init(map);
 	while (adjacency_map_iterator_has_next(&it)){
 		adjacency_map_result res = adjacency_map_iterator_next(&it);
@@ -971,7 +986,6 @@ neuromorph_node* neuromorph_set_output_expected_buffer(adjacency_map* map, float
 		for (size_t i = 0;i<nodes.size;++i){
 			neuromorph_node* candidate = (neuromorph_node*)nodes.data[i];
 			if (candidate->type == OUTPUT_NODE){
-				candidate->expected = expected;
 				return candidate;
 			}
 		}
@@ -1024,10 +1038,10 @@ Summarized Strategy:
 //TODO vectorize everything!!!!!
 //look into data prefetching when simulation is done
 //more efficient approximations of complex functions
-#if defined(sse)
+#if defined(nm_sse)
 void convergence_multiplicative(const float* const path, float* const buffer, const size_t buffer_size){
 	size_t i;
-	for (i = 0;i<=buffer_size-4;i+=4){
+	for (i = 0;i+4<=buffer_size;i+=4){
 		__m128 p = _mm_load_ps(path+i);
 		__m128 b = _mm_load_ps(buffer+i);
 		__m128 result = _mm_mul_ps(p, b);
@@ -1040,7 +1054,7 @@ void convergence_multiplicative(const float* const path, float* const buffer, co
 
 void convergence_additive(const float* const path, float* const buffer, const size_t buffer_size){
 	size_t i;
-	for(i = 0;i<=buffer_size-4;i+=4){
+	for(i = 0;i+4<=buffer_size;i+=4){
 		__m128 p = _mm_load_ps(path+i);
 		__m128 b = _mm_load_ps(buffer+i);
 		__m128 result = _mm_add_ps(p, b);
@@ -1054,7 +1068,7 @@ void convergence_additive(const float* const path, float* const buffer, const si
 void convergence_average(const float* const path, float* const buffer, const size_t buffer_size){
 	size_t i;
 	__m128 two = _mm_set1_ps(2.0f);
-	for (i = 0;i<=buffer_size-4;i+=4){
+	for (i = 0;i+4<=buffer_size;i+=4){
 		__m128 p = _mm_load_ps(path+i);
 		__m128 b = _mm_load_ps(buffer+i);
 		__m128 s = _mm_add_ps(p, b);
@@ -1069,12 +1083,12 @@ void convergence_average(const float* const path, float* const buffer, const siz
 float loss_mse(float* const buffer, const float* const result, const float* const expected, const size_t size, const float parameter){
 	__m128 s = _mm_setzero_ps();
 	size_t i;
-	for (i= 0;i<=size-4;i+=4){
+	for (i= 0;i+4<=size;i+=4){
 		__m128 e = _mm_load_ps(expected+i);
 		__m128 r = _mm_load_ps(result+i);
 		__m128 loss = _mm_sub_ps(e, r);
 		_mm_store_ps(buffer+i,loss);
-#ifdef fma
+#ifdef nm_fma
 		s = _mm_fmadd_ps(loss, loss, s);
 #else
 		__m128 loss_squared = _mm_mul_ps(loss, loss);
@@ -1095,7 +1109,7 @@ float loss_mse(float* const buffer, const float* const result, const float* cons
 float loss_mae(float* const buffer, const float* const result, const float* const expected, const size_t size, const float parameter){
 	__m128 s = _mm_setzero_ps();
 	size_t i;
-	for (i= 0;i<=size-4;i+=4){
+	for (i= 0;i+4<=size;i+=4){
 		__m128 e = _mm_load_ps(expected+i);
 		__m128 r = _mm_load_ps(result+i);
 		__m128 loss = _mm_sub_ps(e, r);
@@ -1117,7 +1131,7 @@ float loss_mae(float* const buffer, const float* const result, const float* cons
 float loss_mape(float* const buffer, const float* const result, const float* const expected, const size_t size, const float parameter){
 	__m128 s = _mm_setzero_ps();
 	size_t i;
-	for (i= 0;i<=size-4;i+=4){
+	for (i= 0;i+4<=size;i+=4){
 		__m128 e = _mm_load_ps(expected+i);
 		__m128 r = _mm_load_ps(result+i);
 		__m128 loss = _mm_sub_ps(e, r);
@@ -1144,7 +1158,7 @@ float loss_huber(float* const buffer, const float* const result, const float* co
 	__m128 param = _mm_set1_ps(parameter);
 	__m128 half = _mm_set1_ps(0.5f);
 	size_t i;
-	for (i= 0;i<=size-4;i+=4){
+	for (i= 0;i+4<=size;i+=4){
 		__m128 e = _mm_load_ps(expected+i);
 		__m128 r = _mm_load_ps(result+i);
 		__m128 loss = _mm_sub_ps(e, r);
@@ -1152,12 +1166,12 @@ float loss_huber(float* const buffer, const float* const result, const float* co
 		__m128 abs_loss = _mm_andnot_ps(_mm_set1_ps(-0.f), loss);
 		__m128 mask = _mm_cmple_ps(abs_loss, param);
 		__m128 case1 = _mm_mul_ps(_mm_mul_ps(loss, loss), half);
-#ifdef fma
+#ifdef nm_fma
 		__m128 case2 = _mm_fmsub_ps(param, abs_loss, param_sq_half);
 #else
 		__m128 case2 = _mm_sub_ps(_mm_mul_ps(param, abs_loss), param_sq_half);
 #endif
-#ifdef sse4_1
+#ifdef nm_sse4_1
 		__m128 combined = _mm_blendv_ps(case2, case1, mask);
 #else
 		__m128 combined = _mm_or_ps(_mm_and_ps(mask, case1), _mm_andnot_ps(mask, case2));
@@ -1185,7 +1199,7 @@ float loss_huber(float* const buffer, const float* const result, const float* co
 float loss_huber_modified(float* const buffer, const float* const result, const float* const expected, const size_t size, const float parameter){
 	__m128 s = _mm_setzero_ps();
 	size_t i;
-	for (i= 0;i<=size-4;i+=4){
+	for (i= 0;i+4<=size;i+=4){
 		__m128 e = _mm_load_ps(expected+i);
 		__m128 r = _mm_load_ps(result+i);
 		__m128 loss = _mm_sub_ps(e, r);
@@ -1198,7 +1212,7 @@ float loss_huber_modified(float* const buffer, const float* const result, const 
 		__m128 case1 = _mm_max_ps(zeros, sub);
 		case1 = _mm_mul_ps(case1, case1);
 		__m128 case2 = _mm_mul_ps(_mm_set1_ps(-4.f), prod);
-#ifdef sse4_1
+#ifdef nm_sse4_1
 		__m128 combined = _mm_blendv_ps(case2, case1, mask);
 #else
 		__m128 combined = _mm_or_ps(_mm_and_ps(mask, case1), _mm_andnot_ps(mask, case2));
@@ -1226,7 +1240,7 @@ float loss_huber_modified(float* const buffer, const float* const result, const 
 float loss_cross_entropy(float* const buffer, const float* const result, const float* const expected, const size_t size, const float parameter){
 	__m128 s = _mm_setzero_ps();
 	size_t i;
-	for (i= 0;i<=size-4;i+=4){
+	for (i= 0;i+4<=size;i+=4){
 		__m128 e = _mm_load_ps(expected+i);
 		__m128 r = _mm_load_ps(result+i);
 		__m128 loss = _mm_sub_ps(e, r);
@@ -1250,7 +1264,7 @@ float loss_cross_entropy(float* const buffer, const float* const result, const f
 float loss_hinge(float* const buffer, const float* const result, const float* const expected, const size_t size, const float parameter){
 	__m128 s = _mm_setzero_ps();
 	size_t i;
-	for (i= 0;i<=size-4;i+=4){
+	for (i= 0;i+4<=size;i+=4){
 		__m128 e = _mm_load_ps(expected+i);
 		__m128 r = _mm_load_ps(result+i);
 		__m128 loss = _mm_sub_ps(e, r);
@@ -1290,7 +1304,7 @@ __m128 exp_neg_ps(__m128 x) {
 void activation_sigmoid(float* const buffer, const size_t size, const float parameter){
 	size_t i;
 	const __m128 one = _mm_set1_ps(1.0f);
-	for (i = 0;i<=size-4;i+=4){
+	for (i = 0;i+4<=size;i+=4){
 		__m128 x = _mm_load_ps(buffer+1);
 		x = _mm_xor_ps(x, _mm_set1_ps(-0.f));
 		__m128 exp_neg_x = exp_neg_ps(x);
@@ -1304,7 +1318,7 @@ void activation_sigmoid(float* const buffer, const size_t size, const float para
 
 void activation_relu(float* const buffer, const size_t size, const float parameter){
 	size_t i;
-	for (i = 0;i<=size-4;i+=4){
+	for (i = 0;i+4<=size;i+=4){
 		__m128 zeros = _mm_setzero_ps();
 		__m128 term = _mm_load_ps(buffer+i);
 		__m128 relu = _mm_max_ps(zeros, term);
@@ -1316,20 +1330,20 @@ void activation_relu(float* const buffer, const size_t size, const float paramet
 }
 
 __m128 tanh_ps(__m128 x) {
-    const __m128 one = _mm_set1_ps(1.0f);
-    // Calculate e^(2x)
-    __m128 exp2x = exp_neg_ps(_mm_mul_ps(x, _mm_set1_ps(-2.0f)));
-    exp2x = _mm_rcp_ps(exp2x);
-    // Calculate (e^(2x) - 1) / (e^(2x) + 1)
-    __m128 num = _mm_sub_ps(exp2x, one);
-    __m128 den = _mm_add_ps(exp2x, one);
-    __m128 tanh_x = _mm_div_ps(num, den);
-    return tanh_x;
+	const __m128 one = _mm_set1_ps(1.0f);
+	// calculate e^(2x)
+	__m128 exp2x = exp_neg_ps(_mm_mul_ps(x, _mm_set1_ps(-2.0f)));
+	exp2x = _mm_rcp_ps(exp2x);
+	// calculate (e^(2x) - 1) / (e^(2x) + 1)
+	__m128 num = _mm_sub_ps(exp2x, one);
+	__m128 den = _mm_add_ps(exp2x, one);
+	__m128 tanh_x = _mm_div_ps(num, den);
+	return tanh_x;
 }
 
 void activation_tanh(float* const buffer, const size_t size, const float parameter){
 	size_t i;
-	for (i = 0;i<=size-4;i+=4){
+	for (i = 0;i+4<=size;i+=4){
 		__m128 x = _mm_load_ps(buffer+i);
 		__m128 tanh_approx = tanh_ps(x);
 		_mm_store_ps(buffer+i, tanh_approx);
@@ -1342,7 +1356,7 @@ void activation_tanh(float* const buffer, const size_t size, const float paramet
 void activation_binary_step(float* const buffer, const size_t size, const float parameter){
 	const __m128 zero = _mm_setzero_ps();
 	size_t i;
-	for (i = 0;i<=size-4;i+=4){
+	for (i = 0;i+4<=size;i+=4){
 		__m128 x = _mm_load_ps(buffer+i);
 		__m128 step = _mm_cmpge_ps(x, zero);
 		_mm_store_ps(buffer+i, step);
@@ -1359,7 +1373,7 @@ void activation_linear(float* const buffer, const size_t size, const float param
 void activation_relu_leaky(float* const buffer, const size_t size, const float parameter){
 	size_t i;
 	const __m128 tenth = _mm_set1_ps(0.1f);
-	for (i=0;i<=size-4;i+=4){
+	for (i=0;i+4<=size;i+=4){
 		__m128 x = _mm_load_ps(buffer+i);
 		__m128 term = _mm_max_ps(_mm_mul_ps(tenth, x), x);
 		_mm_store_ps(buffer+i, term);
@@ -1373,7 +1387,7 @@ void activation_relu_leaky(float* const buffer, const size_t size, const float p
 void activation_relu_parametric(float* const buffer, const size_t size, const float parameter){
 	size_t i;
 	const __m128 tenth = _mm_set1_ps(parameter);
-	for (i=0;i<=size-4;i+=4){
+	for (i=0;i+4<=size;i+=4){
 		__m128 x = _mm_load_ps(buffer+i);
 		__m128 term = _mm_max_ps(_mm_mul_ps(tenth, x), x);
 		_mm_store_ps(buffer+i, term);
@@ -1389,22 +1403,14 @@ void activation_elu(float* const buffer, const size_t size, const float paramete
 	const __m128 one = _mm_set1_ps(1.0f);
 	const __m128 alpha = _mm_set1_ps(parameter);
 	size_t i;
-	for (i=0;i<=size-4;i+=4){
+	for (i=0;i+4<=size;i+=4){
 		__m128 x = _mm_load_ps(buffer+i);
 		__m128 mask = _mm_cmplt_ps(x, zero);
-#ifdef sse4_1
-#ifdef fma
-		__m128 negs = _mm_fmadd_ps(alpha, exp_neg_ps(x), _mm_set1_ps(-alpha));
-#else
+#ifdef nm_sse4_1
 		__m128 negs = _mm_mul_ps(alpha, _mm_sub_ps(exp_neg_ps(x), one));
-#endif
 		__m128 term = _mm_blendv_ps(x, negs, mask);
 #else
-#ifdef fma
-		__m128 negs = _mm_and_ps(mask, _mm_fmadd_ps(alpha, exp_neg_ps(x), _mm_set1_ps(-alpha)));
-#else
 		__m128 negs = _mm_and_ps(mask, _mm_mul_ps(alpha, _mm_sub_ps(exp_neg_ps(x), one)));
-#endif
 		__m128 term = _mm_add_ps(_mm_andnot_ps(mask, x), negs);
 #endif
 		_mm_store_ps(buffer+i, term);
@@ -1421,7 +1427,7 @@ void activation_softmax(float* const buffer, const size_t size, const float para
 	__m128 s = _mm_setzero_ps();
 	const __m128 n1 = _mm_set1_ps(-1.0f);
 	size_t i;
-	for (i = 0;i<=size-4;i+=4){
+	for (i = 0;i+4<=size;i+=4){
 		__m128 x = _mm_load_ps(buffer+i);
 		__m128 exp_x = exp_neg_ps(_mm_mul_ps(x, n1));
 		s = _mm_add_ps(s, exp_x);
@@ -1433,7 +1439,7 @@ void activation_softmax(float* const buffer, const size_t size, const float para
 		denom += expf(buffer[i]);
 	}
 	const __m128 d = _mm_set1_ps(denom);
-	for (i = 0;i<=size-4;i+=4){
+	for (i = 0;i+4<=size;i+=4){
 		__m128 x = _mm_load_ps(buffer+i);
 		__m128 exp_x = exp_neg_ps(_mm_mul_ps(x, n1));
 		__m128 term = _mm_div_ps(exp_x, d);
@@ -1447,7 +1453,7 @@ void activation_softmax(float* const buffer, const size_t size, const float para
 void activation_swish(float* const buffer, const size_t size, const float parameter){
 	size_t i;
 	const __m128 one = _mm_set1_ps(1.0f);
-	for (i = 0;i<=size-4;i+=4){
+	for (i = 0;i+4<=size;i+=4){
 		__m128 x = _mm_load_ps(buffer+i);
 		__m128 denom = _mm_add_ps(one, exp_neg_ps(x));
 		__m128 term = _mm_div_ps(x, denom);
@@ -1466,7 +1472,7 @@ void activation_gelu(float* const buffer, const size_t size, const float paramet
 	const __m128 one = _mm_set1_ps(1.0f);
 	const __m128 sqrt2vpi = _mm_set1_ps(s2p);
 	const __m128 gelu_c = _mm_set1_ps(GELU_C);
-	for (i = 0;i<=size-4;i+=4){
+	for (i = 0;i+4<=size;i+=4){
 		__m128 x = _mm_load_ps(buffer+i);
 		__m128 a = _mm_mul_ps(sqrt2vpi, _mm_add_ps(x, _mm_mul_ps(gelu_c, _mm_mul_ps(x, _mm_mul_ps(x, x)))));
 		__m128 tanh_a = tanh_ps(a);
@@ -1684,9 +1690,10 @@ void neuromorph_mark_loops(neuromorph_node* node, vector* marked){
 	for (size_t i = 0;i<=node->additional_branch_count;++i){
 		if (next->type == CONVERGENT_NODE && vector_contains(marked, (uintptr_t)next)){
 			node->loop = 1;
-			continue;
 		}
-		neuromorph_mark_loops(next, marked);
+		else{
+			neuromorph_mark_loops(next, marked);
+		}
 		if (i < node->additional_branch_count){
 			next = node->additional_branches[i];
 		}
@@ -1704,6 +1711,9 @@ float neuromorph_forward(neuromorph* model){
 }
 
 uint8_t end_of_branch(neuromorph_node* node){
+	if (node->next == NULL){
+		return 0;
+	}
 	return node->next->type == CONVERGENT_NODE && (node->next->prev != node);
 }
 
@@ -1716,24 +1726,26 @@ void thread_signal_ready(neuromorph_node* node){
 
 void node_pass(neuromorph_node* node){
 	size_t i, k;
-#ifdef sse
+#ifdef nm_sse
 	__m128 wsum;
 	__m128 bias;
-	for (i = 0;i<=node->buffer_size-4;i+=4){
+	for (i = 0;i+4<=node->buffer_size;i+=4){
 		wsum = _mm_setzero_ps();
 		bias = _mm_load_ps(node->bias_buffer+i);
 		size_t index = *node->previous_buffer_size*i;
-		for (k = 0;k<=*node->previous_buffer_size-4;k+=4){
+		for (k = 0;k+4<=*node->previous_buffer_size;k+=4){
 			__m128 weight = _mm_load_ps(node->weight_buffer+index+k);
 			__m128 prev = _mm_load_ps(node->previous_neuron_buffer+k);
-#ifdef fma
+			__m128 m = _mm_mul_ps(weight, prev);
+			wsum = _mm_add_ps(wsum, m);
+#ifdef nm_fma
 			wsum = _mm_fmadd_ps(weight, prev, wsum);
 #else
 			wsum = _mm_add_ps(wsum, _mm_mul_ps(weight, prev));
 #endif
 		}
 		for (;k<*node->previous_buffer_size;++k){
-#ifdef fma
+#ifdef nm_fma
 			wsum = _mm_fmadd_ps(_mm_set_ss(node->weight_buffer[index+k]),_mm_set_ss(node->previous_neuron_buffer[k]),wsum);
 #else
 			wsum = _mm_add_ps(wsum, _mm_mul_ps(_mm_set_ss(node->weight_buffer[index+k]),_mm_set_ss(node->previous_neuron_buffer[k])));
@@ -1801,9 +1813,12 @@ void* neuromorph_branch_forward(void* args){
 			neuromorph_branch_forward((void*)node->next);
 		}
 		void* result = NULL;
+		size_t index = 0;
 		pthread_t* threads = malloc(sizeof(pthread_t)*node->additional_branch_count+1);
-		pthread_create(&threads[0], NULL, neuromorph_branch_forward, (void*)node->next);
-		size_t i, index = 1;
+		if (!end){
+			pthread_create(&threads[index++], NULL, neuromorph_branch_forward, (void*)node->next);
+		}
+		size_t i;
 		for (i = 0;i<node->additional_branch_count;++i){
 			neuromorph_node* branch = node->additional_branches[i];
 			if (branch->type == CONVERGENT_NODE && branch->prev != branch){
@@ -1820,6 +1835,7 @@ void* neuromorph_branch_forward(void* args){
 		if (end){
 			thread_signal_ready(node);
 		}
+		free(threads);
 		pthread_exit(result);
 		break;
 	case CONVERGENT_NODE:
@@ -1828,8 +1844,9 @@ void* neuromorph_branch_forward(void* args){
 			if (!(node->convergent_node->ready || node->convergent_node->loop)){
 				pthread_cond_wait(&node->convergent_node->cond, &node->convergent_node->mutex);
 			}
-			if (!node->convergent_node->ready){
+			if (node->convergent_node->ready){
 				pthread_mutex_lock(&node->mutex);
+				printf("merge :)\n");
 				node->convergence_function(node->convergent_buffer, node->neuron_buffer, node->buffer_size);
 				pthread_mutex_unlock(&node->mutex);
 			}
@@ -1930,6 +1947,17 @@ void weight_bias_initialize(neuromorph* model){
 	model->header.bias_function(model->output->bias_buffer, model->output->bias_buffer_size, model->header.bias_parameter_a, model->header.bias_parameter_b);
 }
 
+void neuromorph_test_pass(neuromorph* model){
+	for (size_t i = 0;i<model->input->buffer_size;++i){
+		model->input->neuron_buffer[i] = 0.5;
+	}
+	for (size_t i = 0;i<model->output->buffer_size;++i){
+		model->output->expected[i] = 1;
+	}
+	float loss = neuromorph_forward(model);
+	printf("loss: %f\n", loss);
+}
+
 //TODO forward pass in batches in epochs in training
 //single pass function call for final trained models
 //validation as part of training process
@@ -1968,6 +1996,10 @@ static PyObject* say_hello(PyObject* self, PyObject* args){
 	}
 	neuromorph* model = neuromorph_compile(description);
 	neuromorph_build(model);
+	neuromorph_test_pass(model);
+	neuromorph_test_pass(model);
+	neuromorph_test_pass(model);
+	neuromorph_test_pass(model);
 	neuromorph_free(model);
 	char greeting[256];
 	snprintf(greeting, sizeof(greeting), "compiled and built description:\n\n%s", description);
