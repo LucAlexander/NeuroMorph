@@ -5,24 +5,24 @@
 #include <math.h>
 #include <stdio.h>
 
+//TODO may not need in final build
+#include <assert.h>
+
 #include "NeuroMorph.h"
 
 #ifdef nm_sse
 #include <mm_malloc.h>
 #endif
 
-//TODO figure out why the previous state of things is not preserved losslessly between passes
 //TODO test on larger more complicated network
 //	forward link
 //	backward link
 //	intermediate standby link to middle of another branch
 //TODO the situation where a loop point depends on a future point of its convergence. the convergence may merge after its previous is already updated, rather than before
-void print_buffer(const float* const buffer, const size_t size, const char* end){
-	printf("[");
-	for (size_t i = 0;i<size;++i) printf("%f ",buffer[i]);
-	printf("]%s",end);
-}
-
+//	while calculating: if branch end, wait until loop ready set
+//		loop ready is set by convergent node when it uses a branch ends value to converge
+//	calculate new value and reset loop ready flag
+//
 VECTOR_SOURCE(vector, uintptr_t)
 HASHMAP_SOURCE(adjacency_map, uintptr_t, vector, hash_i)
 VECTOR_SOURCE(vector_u64, ast_node_id)
@@ -508,6 +508,7 @@ uint8_t evaluate_parametric_function_name(parametric_function* const func, const
 		{"mae", PARAMETRIC_LOSS, (GENERIC_FUNCTION_TYPE)loss_mae},
 		{"mape", PARAMETRIC_LOSS, (GENERIC_FUNCTION_TYPE)loss_mape},
 		{"huber", PARAMETRIC_LOSS, (GENERIC_FUNCTION_TYPE)loss_huber},
+		{"huber_modified", PARAMETRIC_LOSS, (GENERIC_FUNCTION_TYPE)loss_huber_modified},
 		{"hinge", PARAMETRIC_LOSS, (GENERIC_FUNCTION_TYPE)loss_hinge},
 		{"cross_entropy", PARAMETRIC_LOSS, (GENERIC_FUNCTION_TYPE)loss_cross_entropy}
 	};
@@ -1698,18 +1699,20 @@ void neuromorph_mark_loops(neuromorph_node* node, vector* marked){
 		return;
 	}
 	vector_push(marked, (uintptr_t)node);
-	neuromorph_node* next = node->next;
-	for (size_t i = 0;i<=node->additional_branch_count;++i){
+	for (size_t i = 0;i<node->additional_branch_count;++i){
+		neuromorph_node* next = node->additional_branches[i];
 		if (next->type == CONVERGENT_NODE && vector_contains(marked, (uintptr_t)next)){
 			node->loop = 1;
+			continue;
 		}
-		else{
-			neuromorph_mark_loops(next, marked);
-		}
-		if (i < node->additional_branch_count){
-			next = node->additional_branches[i];
-		}
+		neuromorph_mark_loops(next, marked);
 	}
+	neuromorph_node* next = node->next;
+	if (next->type == CONVERGENT_NODE && vector_contains(marked, (uintptr_t)next)){
+		node->loop = 1;
+		return;
+	}
+	neuromorph_mark_loops(next, marked);
 }
 
 float neuromorph_forward(neuromorph* model){
@@ -1738,8 +1741,6 @@ void thread_signal_ready(neuromorph_node* node){
 
 void node_pass(neuromorph_node* node){
 	size_t i, k;
-	print_buffer(node->previous_neuron_buffer, *node->previous_buffer_size, "#");
-	print_buffer(node->neuron_buffer, node->buffer_size, "->");
 #ifdef nm_sse
 	__m128 wsum;
 	__m128 bias;
@@ -1780,12 +1781,11 @@ void node_pass(neuromorph_node* node){
 		float wsum = 0;
 		size_t index = *node->previous_buffer_size*i;
 		for (k = 0;k<*node->previous_buffer_size; ++k){
-			wsum += node->weight_buffer[index+k]*node->previous_buffer[k];
+			wsum += node->weight_buffer[index+k]*node->previous_neuron_buffer[k];
 		}
 		node->neuron_buffer[i] = node->bias_buffer[i] + wsum;
 	}
 #endif
-	print_buffer(node->neuron_buffer, node->buffer_size, "\n");
 }
 
 void* neuromorph_branch_forward(void* args){
@@ -1845,7 +1845,9 @@ void* neuromorph_branch_forward(void* args){
 		for (i = 0;i<index;++i){
 			void* candidate;
 			pthread_join(threads[i], &candidate);
-			result = (void*)((uintptr_t)result ^ (uintptr_t)candidate ^ (uintptr_t)result);
+			if (candidate){
+				result = candidate;
+			}
 		}
 		if (end){
 			thread_signal_ready(node);
@@ -1861,10 +1863,7 @@ void* neuromorph_branch_forward(void* args){
 			}
 			if (node->convergent_node->ready){
 				pthread_mutex_lock(&node->mutex);
-				print_buffer(node->previous_neuron_buffer, node->buffer_size, "x");
-				print_buffer(node->convergent_buffer, node->buffer_size, "->");
 				node->convergence_function(node->convergent_buffer, node->previous_neuron_buffer, node->neuron_buffer, node->buffer_size);
-				print_buffer(node->neuron_buffer, node->buffer_size, "\n");
 				pthread_mutex_unlock(&node->mutex);
 			}
 			if (!node->convergent_node->loop){
@@ -1985,24 +1984,6 @@ void neuromorph_test_pass(neuromorph* model){
 //simplify to matrix for locality optimization
 
 static PyObject* helloworld(PyObject* self, PyObject* args){
-	neuromorph* model = neuromorph_compile("(input, 64, sigmoid)[divman,(branchyboi, 128, relu)(bb,256,relu){converge2, otherman, additive}(alex, 768, tanh)|(otherman,48,sigmoid)]{convergeman, alex, multiplicative}(output, 12, sigmoid, mse)");
-	printf("compiled\n");
-	neuromorph_build(model);
-	printf("built\n");
-	neuromorph_free(model);
-	printf("test passed\n");
-	model = neuromorph_compile("(i,5,sigmoid){merge, man, multiplicative}(k,6,sigmoid)[split,[man,]](o,2,relu,mse)");
-	printf("compiled\n");
-	neuromorph_build(model);
-	printf("built\n");
-	neuromorph_free(model);
-	printf("test passed\n");
-	model = neuromorph_compile("(i,5,sigmoid){merge, split, multiplicative}(k,6,sigmoid)[split,](o,2,relu,mse)");
-	printf("compiled\n");
-	neuromorph_build(model);
-	printf("built\n");
-	neuromorph_free(model);
-	printf("test passed\n");
 	return Py_BuildValue("s", "Hello, World!");
 }
 
@@ -2013,13 +1994,15 @@ static PyObject* say_hello(PyObject* self, PyObject* args){
 	}
 	neuromorph* model = neuromorph_compile(description);
 	neuromorph_build(model);
+	printf("compiled and built model:\n%s\n\n Running passes\n\n", description);
 	neuromorph_test_pass(model);
 	neuromorph_test_pass(model);
 	neuromorph_test_pass(model);
 	neuromorph_test_pass(model);
 	neuromorph_free(model);
-	char greeting[256];
-	snprintf(greeting, sizeof(greeting), "compiled and built description:\n\n%s", description);
+	printf("memory freed\n");
+	char greeting[512];
+	snprintf(greeting, sizeof(greeting), "test passed\n\n");
 	return Py_BuildValue("s", greeting);
 }
 
