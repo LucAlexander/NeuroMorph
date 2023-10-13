@@ -178,7 +178,7 @@ uint8_t neuromorph_layer_check_legal(neuromorph_layer_args layer, const ast_node
 uint8_t neuromorph_divergence_check_legal(neuromorph_divergence_args divergence, const ast_node_id* const root);
 uint8_t neuromorph_convergence_check_legal(neuromorph_convergence_args convergence, neuromorph_ast* const ast);
 ast_node_id name_to_id(const char* name);
-uint8_t neuromorph_ast_set_next_id(neuromorph_ast* ast, ast_node_id id, ast_node_id next);
+neuromorph_ast_node* neuromorph_ast_set_next_id(neuromorph_ast* ast, ast_node_id id, ast_node_id next);
 
 uint8_t neuromorph_layer_arg_parse(neuromorph_ast_node* node, uint16_t arg_i, const char* const arg);
 uint8_t neuromorph_pass_parametric_function(neuromorph_ast_node* const node, uint16_t arg_i, const parametric_function* const param);
@@ -190,6 +190,7 @@ void neuromorph_ast_free_internal(neuromorph_ast* const ast);
 HASHMAP(graph_domain, ast_node_id, uintptr_t)
 void neuromorph_build(neuromorph* model);
 neuromorph_node* neuromorph_build_branch(neuromorph_ast* ast, ast_node_id node_id, adjacency_map* adjacency, graph_domain* domain, uint8_t branch, neuromorph_node* node);
+void build_divergent_branches(vector* stale_links, vector* div_nodes, vector_u64* divs, neuromorph_ast* ast, graph_domain* domain, adjacency_map* adjacency, neuromorph_node* leftover);
 void neuromorph_mark_loops(neuromorph_node* node, vector* marked);
 neuromorph_node* neuromorph_pull_output(adjacency_map* map);
 

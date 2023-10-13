@@ -5,24 +5,71 @@
 #include <math.h>
 #include <stdio.h>
 
-//TODO may not need in final build
-#include <assert.h>
-
 #include "NeuroMorph.h"
 
 #ifdef nm_sse
 #include <mm_malloc.h>
 #endif
 
-//TODO test on larger more complicated network
-//	forward link
-//	backward link
-//	intermediate standby link to middle of another branch
-//TODO the situation where a loop point depends on a future point of its convergence. the convergence may merge after its previous is already updated, rather than before
-//	while calculating: if branch end, wait until loop ready set
-//		loop ready is set by convergent node when it uses a branch ends value to converge
-//	calculate new value and reset loop ready flag
-//
+//TODO simd approximations suck apparently - producing nan
+//TODO forward pass in batches in epochs in training
+//single pass function call for final trained models
+//validation as part of training process
+//dataset processing assumed done in python so that we can just be passed direct input vectors
+//gradient calculation
+//back propogation throuogh time
+//I dont want to add support for non posix threading, if youre doing ml on windows what are you doing with your life bro
+//simplify to matrix for locality optimization
+//TODO vectorize everything!!!!!
+//look into data prefetching when simulation is done
+//more efficient approximations of complex functions
+/*
+ * 1. x86_64 Architecture:
+
+    SSE: While older, SSE is still relevant and provides a baseline of SIMD support for nearly all x86_64 CPUs.
+    AVX: Covers many modern but not the latest CPUs. AVX and AVX2 are commonly supported and offer significant performance improvements for many tasks.
+    AVX-512: Found in some high-end Intel CPUs and Xeon processors. It's especially relevant for HPC and data center environments.
+
+2. ARM Architecture:
+
+    NEON: If you later decide to support ARM, NEON is the SIMD technology for ARM processors. It’s widely supported in ARMv7 and ARMv8 architectures.
+
+3. GPU Acceleration:
+
+    CUDA: For NVIDIA GPUs. A significant portion of machine learning, especially deep learning, is accelerated using NVIDIA GPUs.
+    OpenCL/ROCm: For AMD GPUs and other accelerators. OpenCL is a framework for writing programs that execute across heterogeneous platforms.
+
+Feasible Steps for Implementation:
+
+    Baseline Implementation:
+        Begin with a scalar (non-vectorized) baseline implementation that works on any architecture.
+
+    x86_64 Optimizations:
+        Implement optimizations for SSE, AVX, and AVX-512. This can be done incrementally, starting with the most commonly supported instruction sets (SSE and AVX).
+
+    GPU Acceleration (Optional):
+        Depending on the nature of your machine learning tasks, consider implementing GPU-accelerated versions using CUDA or OpenCL. GPUs are prevalent in the machine learning field.
+
+    ARM Support (Future Expansion):
+        When you’re ready to expand, add support for ARM with NEON optimizations. This will be especially relevant for mobile devices, some servers, and Apple Silicon Macs.
+
+    Library Utilization:
+        Consider using libraries like Intel MKL, OpenBLAS, or cuBLAS for matrix operations, which are already optimized for various architectures.
+
+    Testing and Validation:
+        Ensure comprehensive testing on different architectures to validate performance and correctness.
+
+Summarized Strategy:
+
+    Short Term: Focus on x86_64, covering SSE through AVX-512. Consider GPU acceleration if relevant for your tasks.
+    Medium Term: Evaluate the need for ARM support based on your user base and application requirements. Implement ARM NEON optimizations if needed.
+    Long Term: Keep an eye on emerging trends. For example, RISC-V is gaining traction, and the landscape of accelerators (GPUs, TPUs, FPGAs, etc.) is evolving.
+ */
+//TODO make sure the seed is saved if a custom seed is not used
+	//time_t seed = time(NULL);
+//TODO supergraph composition
+
+
 VECTOR_SOURCE(vector, uintptr_t)
 HASHMAP_SOURCE(adjacency_map, uintptr_t, vector, hash_i)
 VECTOR_SOURCE(vector_u64, ast_node_id)
@@ -472,22 +519,22 @@ uint8_t neuromorph_divergence_arg_parse(neuromorph_ast_node* node, uint16_t arg_
 	return 1;
 }
 
-uint8_t neuromorph_ast_set_next_id(neuromorph_ast* ast, ast_node_id id, ast_node_id next){
+neuromorph_ast_node* neuromorph_ast_set_next_id(neuromorph_ast* ast, ast_node_id id, ast_node_id next){
 	neuromorph_ast_node* node = neuromorph_ast_ref(ast, id);
 	if (!node){
 		fprintf(stderr, "previous node with passed id does not exist\n");
-		return 0;
+		return NULL;
 	}
 	if (node->next==-1){
 		node->next = next;
-		return 1;
+		return node;
 	}
 	if (node->type != NEUROMORPH_DIVERGENCE_ARGS){
 		fprintf(stderr, "converging non divergent node with preexisting next\n");
-		return 0;
+		return NULL;
 	}
 	neuromorph_divergence_arg_parse(node, 0, next);
-	return 1;
+	return node;
 }
 
 uint8_t evaluate_parametric_function_name(parametric_function* const func, const char* const name){
@@ -900,10 +947,39 @@ void neuromorph_build(neuromorph* model){
 	weight_bias_initialize(model);
 }
 
+void build_divergent_branches(vector* stale_links, vector* div_nodes, vector_u64* divs, neuromorph_ast* ast, graph_domain* domain, adjacency_map* adjacency, neuromorph_node* leftover){
+	for (size_t di = 0;di<divs->size;++di){
+		neuromorph_ast_node* prev = neuromorph_ast_ref(ast, divs->data[di]);
+		neuromorph_node* current = (neuromorph_node*)div_nodes->data[di];
+		for (size_t i = 0;i<prev->data.divergence.paths.size;++i){
+			ast_node_id candidate = prev->data.divergence.paths.data[i];
+			uintptr_t* branch_ptr = graph_domain_ref(domain, candidate);
+			if (branch_ptr == NULL){
+				neuromorph_build_branch(ast, candidate, adjacency, domain, 1, current);
+				continue;
+			}
+			vector_push(stale_links, *branch_ptr);
+			leftover = current;
+		}
+		if (leftover != NULL){
+			for (size_t stale = 0;stale<stale_links->size;++stale){
+				neuromorph_link(adjacency, leftover, (neuromorph_node*)stale_links->data[stale]);
+			}
+			vector_clear(stale_links);
+			leftover = NULL;
+		}
+	}
+	vector_free(stale_links);
+	vector_u64_free(divs);
+	vector_free(div_nodes);
+}
+
 neuromorph_node* neuromorph_build_branch(neuromorph_ast* ast, ast_node_id node_id, adjacency_map* adjacency, graph_domain* domain, uint8_t branch, neuromorph_node* node){
 	neuromorph_node* initial = NULL;
 	uint8_t first = 1;
 	vector stale_links = vector_init();
+	vector_u64 divs = vector_u64_init();
+	vector div_nodes = vector_init();
 	neuromorph_node* leftover = NULL;
 	while (node_id != -1){
 		neuromorph_ast_node* ast_node = neuromorph_ast_ref(ast, node_id);
@@ -949,27 +1025,9 @@ neuromorph_node* neuromorph_build_branch(neuromorph_ast* ast, ast_node_id node_i
 				neuromorph_link(adjacency, node, current_node);
 				node = NULL;
 			}
-			if (!ast_node->data.divergence.initialized){
-				break;
-			}
-			for (size_t i = 0;i<ast_node->data.divergence.paths.size;++i){
-				ast_node_id candidate = ast_node->data.divergence.paths.data[i];
-				uintptr_t* branch_ptr = graph_domain_ref(domain, candidate);
-				if (branch_ptr == NULL){
-					neuromorph_build_branch(ast, candidate, adjacency, domain, 1, current_node);
-					continue;
-				}
-				vector_push(&stale_links, *branch_ptr);
-				leftover = current_node;
-			}
+			vector_u64_push(&divs, node_id);
+			vector_push(&div_nodes, (uintptr_t)current_node);
 			break;
-		}
-		if (leftover != NULL){
-			for (size_t stale = 0;stale<stale_links.size;++stale){
-				neuromorph_link(adjacency, leftover, (neuromorph_node*)stale_links.data[stale]);
-			}
-			vector_clear(&stale_links);
-			leftover = NULL;
 		}
 		if (node != NULL){
 			neuromorph_link(adjacency, node, current_node);
@@ -982,12 +1040,12 @@ neuromorph_node* neuromorph_build_branch(neuromorph_ast* ast, ast_node_id node_i
 			if (next_node_ptr != NULL){
 				neuromorph_node* next_node = (neuromorph_node*)(*next_node_ptr);
 				neuromorph_link(adjacency, current_node, next_node);
-				vector_free(&stale_links);
+				build_divergent_branches(&stale_links, &div_nodes, &divs, ast, domain, adjacency, leftover);
 				return initial;
 			}
 		}	
 	}
-	vector_free(&stale_links);
+	build_divergent_branches(&stale_links, &div_nodes, &divs, ast, domain, adjacency, leftover);
 	return initial;
 }
 
@@ -1006,52 +1064,7 @@ neuromorph_node* neuromorph_pull_output(adjacency_map* map){
 	return NULL;
 }
 
-/*
- * 1. x86_64 Architecture:
-
-    SSE: While older, SSE is still relevant and provides a baseline of SIMD support for nearly all x86_64 CPUs.
-    AVX: Covers many modern but not the latest CPUs. AVX and AVX2 are commonly supported and offer significant performance improvements for many tasks.
-    AVX-512: Found in some high-end Intel CPUs and Xeon processors. It's especially relevant for HPC and data center environments.
-
-2. ARM Architecture:
-
-    NEON: If you later decide to support ARM, NEON is the SIMD technology for ARM processors. It’s widely supported in ARMv7 and ARMv8 architectures.
-
-3. GPU Acceleration:
-
-    CUDA: For NVIDIA GPUs. A significant portion of machine learning, especially deep learning, is accelerated using NVIDIA GPUs.
-    OpenCL/ROCm: For AMD GPUs and other accelerators. OpenCL is a framework for writing programs that execute across heterogeneous platforms.
-
-Feasible Steps for Implementation:
-
-    Baseline Implementation:
-        Begin with a scalar (non-vectorized) baseline implementation that works on any architecture.
-
-    x86_64 Optimizations:
-        Implement optimizations for SSE, AVX, and AVX-512. This can be done incrementally, starting with the most commonly supported instruction sets (SSE and AVX).
-
-    GPU Acceleration (Optional):
-        Depending on the nature of your machine learning tasks, consider implementing GPU-accelerated versions using CUDA or OpenCL. GPUs are prevalent in the machine learning field.
-
-    ARM Support (Future Expansion):
-        When you’re ready to expand, add support for ARM with NEON optimizations. This will be especially relevant for mobile devices, some servers, and Apple Silicon Macs.
-
-    Library Utilization:
-        Consider using libraries like Intel MKL, OpenBLAS, or cuBLAS for matrix operations, which are already optimized for various architectures.
-
-    Testing and Validation:
-        Ensure comprehensive testing on different architectures to validate performance and correctness.
-
-Summarized Strategy:
-
-    Short Term: Focus on x86_64, covering SSE through AVX-512. Consider GPU acceleration if relevant for your tasks.
-    Medium Term: Evaluate the need for ARM support based on your user base and application requirements. Implement ARM NEON optimizations if needed.
-    Long Term: Keep an eye on emerging trends. For example, RISC-V is gaining traction, and the landscape of accelerators (GPUs, TPUs, FPGAs, etc.) is evolving.
- */
-//TODO vectorize everything!!!!!
-//look into data prefetching when simulation is done
-//more efficient approximations of complex functions
-#if defined(nm_sse)
+#ifdef nm_sse
 void convergence_multiplicative(const float* const path, const float* const previous, float* const buffer, const size_t buffer_size){
 	size_t i;
 	for (i = 0;i+4<=buffer_size;i+=4){
@@ -1708,9 +1721,14 @@ void neuromorph_mark_loops(neuromorph_node* node, vector* marked){
 		neuromorph_mark_loops(next, marked);
 	}
 	neuromorph_node* next = node->next;
-	if (next->type == CONVERGENT_NODE && vector_contains(marked, (uintptr_t)next)){
-		node->loop = 1;
-		return;
+	if (next->type == CONVERGENT_NODE){
+		if (vector_contains(marked, (uintptr_t)next)){
+			node->loop = 1;
+			return;
+		}
+		if (next->prev != node){
+			return;
+		}
 	}
 	neuromorph_mark_loops(next, marked);
 }
@@ -1735,7 +1753,7 @@ uint8_t end_of_branch(neuromorph_node* node){
 void thread_signal_ready(neuromorph_node* node){
 	pthread_mutex_lock(&node->mutex);
 	node->ready = 1;
-	pthread_cond_signal(&node->cond);
+	pthread_cond_broadcast(&node->cond);
 	pthread_mutex_unlock(&node->mutex);
 }
 
@@ -1861,11 +1879,9 @@ void* neuromorph_branch_forward(void* args){
 			if (!(node->convergent_node->ready || node->convergent_node->loop)){
 				pthread_cond_wait(&node->convergent_node->cond, &node->convergent_node->mutex);
 			}
-			if (node->convergent_node->ready){
-				pthread_mutex_lock(&node->mutex);
-				node->convergence_function(node->convergent_buffer, node->previous_neuron_buffer, node->neuron_buffer, node->buffer_size);
-				pthread_mutex_unlock(&node->mutex);
-			}
+			pthread_mutex_lock(&node->mutex);
+			node->convergence_function(node->convergent_buffer, node->previous_neuron_buffer, node->neuron_buffer, node->buffer_size);
+			pthread_mutex_unlock(&node->mutex);
 			if (!node->convergent_node->loop){
 				node->convergent_node->ready = 0;
 			}
@@ -1882,8 +1898,6 @@ void* neuromorph_branch_forward(void* args){
 }
 
 void set_seed(time_t seed){
-	//TODO make sure the seed is saved if a custom seed is not used
-	//time_t seed = time(NULL);
 	srandom(seed);
 }
 
@@ -1973,15 +1987,6 @@ void neuromorph_test_pass(neuromorph* model){
 	float loss = neuromorph_forward(model);
 	printf("loss: %f\n", loss);
 }
-
-//TODO forward pass in batches in epochs in training
-//single pass function call for final trained models
-//validation as part of training process
-//dataset processing assumed done in python so that we can just be passed direct input vectors
-//gradient calculation
-//back propogation throuogh time
-//I dont want to add support for non posix threading, if youre doing ml on windows what are you doing with your life bro
-//simplify to matrix for locality optimization
 
 static PyObject* helloworld(PyObject* self, PyObject* args){
 	return Py_BuildValue("s", "Hello, World!");
