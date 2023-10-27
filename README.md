@@ -1,7 +1,7 @@
 # NEUROMORPH
 # TODO
-* simulation system including helper functions and algorithms
+* thorough testing for BPTT
 * Python interface layer for training and validating
 * documentation
-* advanced merging systems
+* refactors and optimizations
 * continue SIMD for different architectures / versions
