@@ -2227,7 +2227,10 @@ void loss_hinge_partial(float* const gradient, const float* const result, const 
 }
 
 void activation_sigmoid_partial(float* const gradient, const float* const buffer, const size_t size, const float parameter){
-	//TODO
+	for (size_t i = 0;i<size;++i){
+		float fx = 1/(1+expf(-buffer[i]));
+		gradient[i] = fx*(1-fx);
+	}
 }
 
 void activation_relu_partial(float* const gradient, const float* const buffer, const size_t size, const float parameter){
@@ -2243,7 +2246,8 @@ void activation_tanh_partial(float* const gradient, const float* const buffer, c
 }
 
 void activation_binary_step_partial(float* const gradient, const float* const buffer, const size_t size, const float parameter){
-	//TODO
+	fprintf(stderr, "you shouldnt be using a step based activation function with a gradient optimizer. Derivative is undefined. Gradients have been set to 0 to avoid crashes, but note that this has made them ineffective\n");
+	memset(gradient, 0, size*sizeof(float));
 }
 
 void activation_linear_partial(float* const gradient, const float* const buffer, const size_t size, const float parameter){
@@ -2281,15 +2285,40 @@ void activation_elu_partial(float* const gradient, const float* const buffer, co
 }
 
 void activation_softmax_partial(float* const gradient, const float* const buffer, const size_t size, const float parameter){
-	//TODO
+	float sum = 0.0f;
+	float* softmax_values = malloc(sizeof(float)*size);
+	for (size_t i = 0;i<size;++i){
+		softmax_values[i] = exp(buffer[i]);
+		sum += softmax_values[i];
+	}
+	for (size_t i = 0;i<size;++i){
+		softmax_values[i] /= sum;
+	}
+	for (size_t i = 0;i<size;++i){
+		gradient[i] = softmax_values[i]*(1-softmax_values[i]);
+		for (size_t j = 0;j<size;++j){
+			if (i!=j){
+				gradient[i] -= softmax_values[i]*softmax_values[j];
+			}
+		}
+	}
+	free(softmax_values);
 }
 
 void activation_swish_partial(float* const gradient, const float* const buffer, const size_t size, const float parameter){
-	//TODO
+	for (size_t i = 0;i<size;++i){
+		float fx = 1/(1+expf(-buffer[i]*parameter));
+		gradient[i] = fx+parameter*buffer[i]*fx*(1-fx);
+	}
 }
 
 void activation_gelu_partial(float* const gradient, const float* const buffer, const size_t size, const float parameter){
-	//TODO
+	float s2op = sqrt(2/M_PI);
+	for (size_t i = 0;i<size;++i){
+		float x = buffer[i];
+		float inside = tanh(s2op*(x+GELU_C*powf(x, 3)));
+		gradient[i] = 0.5*(1+inside)+0.5*x*(1-powf(inside, 2))*s2op*(1+3*GELU_C*x*x);
+	}
 }
 
 void activation_selu_partial(float* const gradient, const float* const buffer, const size_t size, const float parameter){
@@ -2568,7 +2597,11 @@ static PyObject* say_hello(PyObject* self, PyObject* args){
 	neuromorph* model = neuromorph_compile(description, 5, 0.001);
 	neuromorph_build(model);
 	printf("compiled and built model:\n%s\n\n Running batch test\n\n", description);
-	// TODO test train batch
+	float* input = malloc(sizeof(float)*5*model->input->buffer_size);
+	float* expected = malloc(sizeof(float)*5*model->output->buffer_size);
+	neuromorph_train_batch(model, input, expected, 2);
+	free(input);
+	free(expected);
 	neuromorph_free(model);
 	printf("memory freed\n");
 	char greeting[512];
