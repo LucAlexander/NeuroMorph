@@ -11,28 +11,13 @@
 #include <mm_malloc.h>
 #endif
 
-//TODO remove
-#include <sys/types.h>
-
-
 //TODO user level data passing system so we can run batches at the very least
-//TODO BPTT testing
 //TODO divergence nodes have to have the same width rn, and have the same width as the source they diverge from
 //TODO reset flags for backprop after backprop
-//TODO branch id heirarchy for complex loop determinism
-//TODO branch ids arent getting set correctly
-//	check single node branch case
 //
 //TODO current simd approximations produce nan
-//TODO forward pass in batches in epochs in training
-//single pass function call for final trained models
-//validation as part of training process
-//dataset processing assumed done in python so that we can just be passed direct input vectors
-//gradient calculation
-//back propogation throuogh time
-//I dont want to add support for non posix threading, if youre doing ml on windows what are you doing with your life bro
 //simplify to matrix for locality optimization
-//TODO vectorize everything!!!!!
+//vectorize everything!!!!!
 //look into data prefetching when simulation is done
 //more efficient approximations of complex functions
 /*
