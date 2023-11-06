@@ -11,10 +11,18 @@
 #include <mm_malloc.h>
 #endif
 
+//TODO remove
+#include <sys/types.h>
+
+
 //TODO user level data passing system so we can run batches at the very least
 //TODO BPTT testing
 //TODO divergence nodes have to have the same width rn, and have the same width as the source they diverge from
-
+//TODO reset flags for backprop after backprop
+//TODO branch id heirarchy for complex loop determinism
+//TODO branch ids arent getting set correctly
+//	check single node branch case
+//
 //TODO current simd approximations produce nan
 //TODO forward pass in batches in epochs in training
 //single pass function call for final trained models
@@ -191,7 +199,9 @@ void neuromorph_node_free(neuromorph_node* node){
 	_mm_free(node->neuron_buffer_raw);
 	_mm_free(node->weight_buffer);
 	_mm_free(node->bias_buffer);
-	_mm_free(node->gradient_buffer);
+	if (node->type != DIVERGENT_NODE){
+		_mm_free(node->gradient_buffer);
+	}
 	_mm_free(node->path_gradient_buffer);
 	if (node->type == INPUT_NODE){
 		_mm_free(node->expected);
@@ -201,7 +211,9 @@ void neuromorph_node_free(neuromorph_node* node){
 	free(node->neuron_buffer_raw);
 	free(node->weight_buffer);
 	free(node->bias_buffer);
-	free(node->gradient_buffer);
+	if (node->type != DIVERGENT_NODE){
+		free(node->gradient_buffer);
+	}
 	free(node->path_gradient_buffer);
 	if (node->type == INPUT_NODE){
 		free(node->expected);
@@ -244,7 +256,10 @@ uint8_t neuromorph_link_source(neuromorph_node* const source, neuromorph_node* c
 				source->additional_branches = malloc(sizeof(neuromorph_node*));
 }
 			else{
-				source->additional_branches = realloc(source->additional_branches, sizeof(neuromorph_node*)*source->additional_branch_count);
+				source->additional_branches = realloc(
+					source->additional_branches,
+					sizeof(neuromorph_node*)*source->additional_branch_count
+				);
 			}
 			source->additional_branches[source->additional_branch_count-1] = destination;
 			source->previous_weight_buffer = NULL;
@@ -348,6 +363,7 @@ neuromorph* neuromorph_init(size_t batch_size, float learning_rate){
 	model->batch_size = batch_size;
 	model->batch_backlog = NULL;
 	model->batch_expected = NULL;
+	model->backlog_size = 0;
 	model->learning_rate = learning_rate;
 	pthread_mutex_init(&model->backlog_mutex, NULL);
 	return model;
@@ -570,9 +586,9 @@ uint8_t neuromorph_convergence_arg_parse(neuromorph_ast_node* node, uint16_t arg
 }
 
 uint8_t neuromorph_divergence_arg_parse(neuromorph_ast_node* node, uint16_t arg_i, ast_node_id id){
-	if (arg_i == 0){
+	if (arg_i == 0 && !node->data.divergence.initialized){
 		node->data.divergence.paths = vector_u64_init();
-		node->data.divergence.initialized = 1;
+		node->data.divergence.initialized = 5;
 	}
 	vector_u64_push(&node->data.divergence.paths, id);
 	return 1;
@@ -586,6 +602,10 @@ neuromorph_ast_node* neuromorph_ast_set_next_id(neuromorph_ast* ast, ast_node_id
 	}
 	if (node->next==-1){
 		node->next = next;
+		if (node->type == NEUROMORPH_DIVERGENCE_ARGS && node->data.divergence.initialized == 0){
+			node->data.divergence.paths = vector_u64_init();
+			node->data.divergence.initialized = 1;
+		}
 		return node;
 	}
 	if (node->type != NEUROMORPH_DIVERGENCE_ARGS){
@@ -680,11 +700,13 @@ uint8_t evaluate_parametric_function_name(parametric_function* const func, const
 			func->type = function_list[i].type;
 			if (func->type == PARAMETRIC_ACTIVATION){
 				func->function.activation = (ACTIVATION_TYPE)function_list[i].function;
-				func->derivative.activation = (ACTIVATION_DERIVATIVE_TYPE)function_list[i].function_derivative;
+				func->derivative.activation = 
+					(ACTIVATION_DERIVATIVE_TYPE)function_list[i].function_derivative;
 				return 1;
 			}
 			func->function.loss = (LOSS_TYPE)function_list[i].function;
-			func->derivative.loss_function_derivative = (LOSS_DERIVATIVE_TYPE)function_list[i].function_derivative;
+			func->derivative.loss_function_derivative =
+				(LOSS_DERIVATIVE_TYPE)function_list[i].function_derivative;
 			return 1;
 		}
 	}
@@ -748,13 +770,16 @@ uint8_t parse_parametric_function(parametric_function* const func, const char** 
 uint8_t neuromorph_pass_parametric_function(neuromorph_ast_node* const node, uint16_t arg_i, const parametric_function* const param){
 	if (param->type == PARAMETRIC_ACTIVATION){
 		node->data.layer.activation_function = (ACTIVATION_TYPE)param->function.activation;
-		node->data.layer.activation_function_derivative = (ACTIVATION_DERIVATIVE_TYPE)param->derivative.activation;
+		node->data.layer.activation_function_derivative = 
+			(ACTIVATION_DERIVATIVE_TYPE)param->derivative.activation;
 		node->data.layer.activation_parameter = param->parameter;
 		return 1;
 	}
 	if (param->type == PARAMETRIC_LOSS){
-		node->data.layer.loss_function = (LOSS_TYPE)param->function.loss;
-		node->data.layer.loss_function_derivative = (LOSS_DERIVATIVE_TYPE)param->derivative.loss_function_derivative;
+		node->data.layer.loss_function =
+			(LOSS_TYPE)param->function.loss;
+		node->data.layer.loss_function_derivative =
+			(LOSS_DERIVATIVE_TYPE)param->derivative.loss_function_derivative;
 		node->data.layer.loss_parameter = param->parameter;
 		return 1;
 	}
@@ -1000,7 +1025,7 @@ uint8_t neuromorph_divergence_check_legal(neuromorph_divergence_args divergence,
 	for (size_t i = 0;i<divergence.paths.size;++i){
 		ast_node_id next = divergence.paths.data[i];
 		if (next == -1 || next == *root){
-			fprintf(stderr, "invalid split path to root or output\n");
+			fprintf(stderr, "invalid split path to root or output, next=%ld\n", next);
 			return 0;
 		}
 	}
@@ -1058,7 +1083,15 @@ uint8_t neuromorph_compile_check_legal(neuromorph_ast* const ast, const ast_node
 void neuromorph_build(neuromorph* model){
 	ast_node_id node_id = model->ast_root;
 	graph_domain domain = graph_domain_init();
-	model->input = neuromorph_build_branch(&model->ast, node_id, &model->adjacency, &domain, 0, NULL, &model->backlog_size);
+	model->input = neuromorph_build_branch(
+		&model->ast,
+		node_id,
+		&model->adjacency,
+		&domain,
+		0,
+		NULL,
+		&model->backlog_size
+	);
 	model->batch_backlog = malloc(sizeof(float)*model->backlog_size*model->batch_size);
 	graph_domain_free(&domain);
 	vector marked = vector_init();
@@ -1077,7 +1110,7 @@ void register_backlog(neuromorph_node* current_node, size_t* const backlog_size)
 		current_node->backlog_offset_activation = current_node->buffer_size;
 		*backlog_size += 2*current_node->buffer_size;
 		break;
-	case INPUT_NODE://TODO
+	case INPUT_NODE:
 	case CONVERGENT_NODE:
 		current_node->backlog_offset = *backlog_size;
 		current_node->backlog_offset_activation = 0;
@@ -1096,7 +1129,15 @@ void build_divergent_branches(vector* stale_links, vector* div_nodes, vector_u64
 			ast_node_id candidate = prev->data.divergence.paths.data[i];
 			uintptr_t* branch_ptr = graph_domain_ref(domain, candidate);
 			if (branch_ptr == NULL){
-				neuromorph_build_branch(ast, candidate, adjacency, domain, 1, current, backlog_size);
+				neuromorph_build_branch(
+					ast,
+					candidate,
+					adjacency,
+					domain,
+					1,
+					current,
+					backlog_size
+				);
 				continue;
 			}
 			vector_push(stale_links, *branch_ptr);
@@ -1129,7 +1170,12 @@ neuromorph_node* neuromorph_build_branch(neuromorph_ast* ast, ast_node_id node_i
 		case NEUROMORPH_LAYER_ARGS:
 			if (first){
 				if (branch){
-					current_node = neuromorph_layer_init(ast_node->data.layer.layer_size, ast_node->data.layer.activation_function, ast_node->data.layer.activation_function_derivative, ast_node->data.layer.activation_parameter);
+					current_node = neuromorph_layer_init(
+						ast_node->data.layer.layer_size,
+						ast_node->data.layer.activation_function,
+						ast_node->data.layer.activation_function_derivative,
+						ast_node->data.layer.activation_parameter
+					);
 				}
 				else{
 					current_node = neuromorph_input_init(ast_node->data.layer.layer_size);
@@ -1144,13 +1190,29 @@ neuromorph_node* neuromorph_build_branch(neuromorph_ast* ast, ast_node_id node_i
 				node = link;
 			}
 			if (ast_node->next == -1){
-				current_node = neuromorph_output_init(ast_node->data.layer.layer_size, ast_node->data.layer.activation_function, ast_node->data.layer.activation_function_derivative, ast_node->data.layer.activation_parameter, ast_node->data.layer.loss_function, ast_node->data.layer.loss_function_derivative, ast_node->data.layer.loss_parameter);
+				current_node = neuromorph_output_init(
+					ast_node->data.layer.layer_size,
+					ast_node->data.layer.activation_function,
+					ast_node->data.layer.activation_function_derivative,
+					ast_node->data.layer.activation_parameter,
+					ast_node->data.layer.loss_function,
+					ast_node->data.layer.loss_function_derivative,
+					ast_node->data.layer.loss_parameter
+				);
 				break;
 			}
-			current_node = neuromorph_layer_init(ast_node->data.layer.layer_size, ast_node->data.layer.activation_function, ast_node->data.layer.activation_function_derivative, ast_node->data.layer.activation_parameter);
+			current_node = neuromorph_layer_init(
+				ast_node->data.layer.layer_size,
+				ast_node->data.layer.activation_function,
+				ast_node->data.layer.activation_function_derivative,
+				ast_node->data.layer.activation_parameter
+			);
 			break;
 		case NEUROMORPH_CONVERGENCE_ARGS:
-			current_node = neuromorph_convergent_init(ast_node->data.convergence.convergence_function, ast_node->data.convergence.convergence_function_derivative);
+			current_node = neuromorph_convergent_init(
+				ast_node->data.convergence.convergence_function,
+				ast_node->data.convergence.convergence_function_derivative
+			);
 			if (first){
 				first = 0;
 				initial = current_node;
@@ -1182,12 +1244,30 @@ neuromorph_node* neuromorph_build_branch(neuromorph_ast* ast, ast_node_id node_i
 			if (next_node_ptr != NULL){
 				neuromorph_node* next_node = (neuromorph_node*)(*next_node_ptr);
 				neuromorph_link(adjacency, current_node, next_node);
-				build_divergent_branches(&stale_links, &div_nodes, &divs, ast, domain, adjacency, leftover, backlog_size);
+				build_divergent_branches(
+					&stale_links,
+					&div_nodes,
+					&divs,
+					ast,
+					domain,
+					adjacency,
+					leftover,
+					backlog_size
+				);
 				return initial;
 			}
 		}	
 	}
-	build_divergent_branches(&stale_links, &div_nodes, &divs, ast, domain, adjacency, leftover, backlog_size);
+	build_divergent_branches(
+		&stale_links,
+		&div_nodes,
+		&divs,
+		ast,
+		domain,
+		adjacency,
+		leftover,
+		backlog_size
+	);
 	return initial;
 }
 
@@ -1642,7 +1722,10 @@ void activation_gelu(float* const buffer, const size_t size, const float paramet
 	const __m128 gelu_c = _mm_set1_ps(GELU_C);
 	for (i = 0;i+4<=size;i+=4){
 		__m128 x = _mm_load_ps(buffer+i);
-		__m128 a = _mm_mul_ps(sqrt2vpi, _mm_add_ps(x, _mm_mul_ps(gelu_c, _mm_mul_ps(x, _mm_mul_ps(x, x)))));
+		__m128 a = _mm_mul_ps(
+			sqrt2vpi,
+			_mm_add_ps(x, _mm_mul_ps(gelu_c, _mm_mul_ps(x, _mm_mul_ps(x, x))))
+		);
 		__m128 tanh_a = tanh_ps(a);
 		__m128 gelu = _mm_mul_ps(half, _mm_mul_ps(x, _mm_add_ps(one, tanh_a)));
 		_mm_store_ps(buffer+i, gelu);
@@ -1850,29 +1933,26 @@ void activation_selu(float* const buffer, const size_t size, const float paramet
 #endif
 
 uint8_t neuromorph_mark_loops(neuromorph_node* node, vector* marked){
-	if (node->next == NULL){
-		return node->loop;
+	if (!node){
+		return 0;
 	}
 	vector_push(marked, (uintptr_t)node);
 	for (size_t i = 0;i<node->additional_branch_count;++i){
-		neuromorph_node* next = node->additional_branches[i];
-		if (next->type == CONVERGENT_NODE && vector_contains(marked, (uintptr_t)next)){
+		neuromorph_node* branch_candidate = node->additional_branches[i];
+		if (vector_contains(marked, (uintptr_t)branch_candidate)){
 			node->loop = 1;
 			continue;
 		}
-		next->loop_start = neuromorph_mark_loops(next, marked);
+		branch_candidate->loop_start = neuromorph_mark_loops(branch_candidate, marked);
 	}
-	neuromorph_node* next = node->next;
-	if (next->type == CONVERGENT_NODE){
-		if (vector_contains(marked, (uintptr_t)next)){
-			node->loop = 1;
-			return node->loop;
-		}
-		if (next->prev != node){
-			return node->loop;
-		}
+	if (vector_contains(marked, (uintptr_t)node->next)){
+		node->loop = 1;
+		vector_pop(marked);
+		return 1;
 	}
-	return neuromorph_mark_loops(next, marked);
+	uint8_t start = neuromorph_mark_loops(node->next, marked);
+	vector_pop(marked);
+	return start;
 }
 
 float neuromorph_forward(neuromorph* model, uint16_t pass_count){
@@ -1927,9 +2007,19 @@ void node_pass(neuromorph_node* node){
 		}
 		for (;k<*node->previous_buffer_size;++k){
 #ifdef nm_fma
-			wsum = _mm_fmadd_ps(_mm_set_ss(node->weight_buffer[index+k]),_mm_set_ss(node->previous_neuron_buffer[k]),wsum);
+			wsum = _mm_fmadd_ps(
+				_mm_set_ss(node->weight_buffer[index+k]),
+				_mm_set_ss(node->previous_neuron_buffer[k]),
+				wsum
+			);
 #else
-			wsum = _mm_add_ps(wsum, _mm_mul_ps(_mm_set_ss(node->weight_buffer[index+k]),_mm_set_ss(node->previous_neuron_buffer[k])));
+			wsum = _mm_add_ps(
+				wsum,
+				_mm_mul_ps(
+					_mm_set_ss(node->weight_buffer[index+k]),
+					_mm_set_ss(node->previous_neuron_buffer[k])
+				)
+			);
 #endif
 		}
 		_mm_store_ps(node->neuron_buffer+i, _mm_add_ps(bias, wsum));
@@ -1983,20 +2073,54 @@ void* neuromorph_branch_forward(void* arg_pair){
 	case OUTPUT_NODE:
 		pthread_mutex_lock(&node->mutex);
 		node_pass(node);
-		write_to_backlog(backlog, mut, node->neuron_buffer, node->buffer_size, node->backlog_offset, args->batch);
+		write_to_backlog(
+			backlog,
+			mut,
+			node->neuron_buffer,
+			node->buffer_size,
+			node->backlog_offset,
+			args->batch
+		);
 		node->activation_function(node->neuron_buffer, node->buffer_size, node->activation_parameter);
-		write_to_backlog(backlog, mut, node->neuron_buffer, node->buffer_size, node->backlog_offset+node->backlog_offset_activation, args->batch);
+		write_to_backlog(
+			backlog,
+			mut,
+			node->neuron_buffer,
+			node->buffer_size,
+			node->backlog_offset+node->backlog_offset_activation,
+			args->batch
+		);
 		float* loss = malloc(sizeof(float));
-		*loss = node->loss_function(node->neuron_buffer, node->neuron_buffer, node->expected, node->buffer_size, node->loss_parameter);
+		*loss = node->loss_function(
+			node->neuron_buffer,
+			node->neuron_buffer,
+			node->expected,
+			node->buffer_size,
+			node->loss_parameter
+		);
 		pthread_mutex_unlock(&node->mutex);
 		pthread_exit((void*)loss);
 		break;
 	case LAYER_NODE:
 		pthread_mutex_lock(&node->mutex);
 		node_pass(node);
-		write_to_backlog(backlog, mut, node->neuron_buffer, node->buffer_size, node->backlog_offset, args->batch);
+		write_to_backlog(
+			backlog,
+			mut,
+			node->neuron_buffer,
+			node->buffer_size,
+			node->backlog_offset,
+			args->batch
+		);
 		node->activation_function(node->neuron_buffer, node->buffer_size, node->activation_parameter);
-		write_to_backlog(backlog, mut, node->neuron_buffer, node->buffer_size, node->backlog_offset+node->backlog_offset_activation, args->batch);
+		write_to_backlog(
+			backlog,
+			mut,
+			node->neuron_buffer,
+			node->buffer_size,
+			node->backlog_offset+node->backlog_offset_activation,
+			args->batch
+		);
 		pthread_mutex_unlock(&node->mutex);
 		if (end){
 			thread_signal_ready(node);
@@ -2019,14 +2143,19 @@ void* neuromorph_branch_forward(void* arg_pair){
 			pthread_create(&threads[index++], NULL, neuromorph_branch_forward, (void*)(&new_pair));
 		}
 		size_t i;
+		forward_args* branch_args = malloc(sizeof(forward_args)*node->additional_branch_count);
 		for (i = 0;i<node->additional_branch_count;++i){
 			neuromorph_node* branch = node->additional_branches[i];
-			if (branch->type == CONVERGENT_NODE && branch->prev != branch){
+			if (branch->type == CONVERGENT_NODE && branch->prev != node){
 				end = 1;
 				continue;
 			}
-			forward_args branch_pair = {branch, backlog, mut, args->batch};
-			pthread_create(&threads[index++], NULL, neuromorph_branch_forward, (void*)(&branch_pair));
+			forward_args* branch_pair = branch_args+i;
+			branch_pair->node = branch;
+			branch_pair->backlog = backlog;
+			branch_pair->mut = mut;
+			branch_pair->batch = args->batch;
+			pthread_create(&threads[index++], NULL, neuromorph_branch_forward, (void*)(branch_pair));
 		}
 		for (i = 0;i<index;++i){
 			void* candidate;
@@ -2035,6 +2164,7 @@ void* neuromorph_branch_forward(void* arg_pair){
 				result = candidate;
 			}
 		}
+		free(branch_args);
 		if (end){
 			thread_signal_ready(node);
 		}
@@ -2049,8 +2179,20 @@ void* neuromorph_branch_forward(void* arg_pair){
 				pthread_cond_wait(&node->convergent_node->cond, &node->convergent_node->mutex);
 			}
 			pthread_mutex_lock(&node->mutex);
-			node->convergence_function(node->convergent_buffer, node->previous_neuron_buffer, node->neuron_buffer, node->buffer_size);
-			write_to_backlog(backlog, mut, node->neuron_buffer, node->buffer_size, node->backlog_offset, args->batch);
+			node->convergence_function(
+				node->convergent_buffer,
+				node->previous_neuron_buffer,
+				node->neuron_buffer,
+				node->buffer_size
+			);
+			write_to_backlog(
+				backlog,
+				mut,
+				node->neuron_buffer,
+				node->buffer_size,
+				node->backlog_offset,
+				args->batch
+			);
 			pthread_mutex_unlock(&node->mutex);
 			if (!node->convergent_node->loop){
 				node->convergent_node->ready = 0;
@@ -2139,12 +2281,34 @@ void weight_bias_initialize(neuromorph* model){
 	while (adjacency_map_iterator_has_next(&it)){
 		neuromorph_node* node = (neuromorph_node*)adjacency_map_iterator_next(&it).key;
 		if (node->type == LAYER_NODE){
-			model->header.weight_function(node->weight_buffer, *node->previous_buffer_size, node->buffer_size, model->header.weight_parameter_a, model->header.weight_parameter_b);
-			model->header.bias_function(node->bias_buffer, node->bias_buffer_size, model->header.bias_parameter_a, model->header.bias_parameter_b);
+			model->header.weight_function(
+				node->weight_buffer,
+				*node->previous_buffer_size,
+				node->buffer_size,
+				model->header.weight_parameter_a,
+				model->header.weight_parameter_b
+			);
+			model->header.bias_function(
+				node->bias_buffer,
+				node->bias_buffer_size,
+				model->header.bias_parameter_a,
+				model->header.bias_parameter_b
+			);
 		}
 	}
-	model->header.weight_function(model->output->weight_buffer, *model->output->previous_buffer_size, model->output->buffer_size, model->header.weight_parameter_a, model->header.weight_parameter_b);
-	model->header.bias_function(model->output->bias_buffer, model->output->bias_buffer_size, model->header.bias_parameter_a, model->header.bias_parameter_b);
+	model->header.weight_function(
+		model->output->weight_buffer,
+		*model->output->previous_buffer_size,
+		model->output->buffer_size,
+		model->header.weight_parameter_a,
+		model->header.weight_parameter_b
+	);
+	model->header.bias_function(
+		model->output->bias_buffer,
+		model->output->bias_buffer_size,
+		model->header.bias_parameter_a,
+		model->header.bias_parameter_b
+	);
 }
 
 void convergence_multiplicative_partial(const float* const prev_gradient, const float* const prev, const float* const path, float* const gradient, float* const path_gradient, const size_t size){
@@ -2391,8 +2555,12 @@ void gradient_propogate_end(neuromorph_node* node, size_t backlog_size, size_t b
 			float gradient_component = node->neuron_buffer[i];
 			node->gradient_buffer[i] += gradient_component;
 			size_t index = i*(*node->previous_buffer_size);
-			for (size_t k = 0;k<*node->previous_buffer_size;++i){
-				weight_gradients[index+k] += gradient_component*backlog[batch_index+(*node->previous_backlog_offset+(*node->previous_backlog_activation))+k];
+			for (size_t k = 0;k<*node->previous_buffer_size;++k){
+				weight_gradients[index+k] += gradient_component*backlog[
+					batch_index+
+					(*node->previous_backlog_offset+(*node->previous_backlog_activation))+
+					k
+				];
 			}
 		}
 	}
@@ -2453,8 +2621,12 @@ void gradient_propogate(neuromorph_node* node, size_t backlog_size, size_t batch
 			float gradient_component = base_gradients[i]*node->neuron_buffer[i];
 			node->gradient_buffer[i] += gradient_component;
 			size_t index = i*(*node->previous_buffer_size);
-			for (size_t k = 0;k<*node->previous_buffer_size;++i){
-				weight_gradients[index+k] += gradient_component*backlog[batch_index+(*node->previous_backlog_offset+(*node->previous_backlog_activation))+k];
+			for (size_t k = 0;k<*node->previous_buffer_size;++k){
+				weight_gradients[index+k] += gradient_component*backlog[
+					batch_index+
+					(*node->previous_backlog_offset+(*node->previous_backlog_activation))+
+					k
+				];
 			}
 		}
 	}
@@ -2473,9 +2645,9 @@ void back_transfer_logic(neuromorph_node* node, size_t batch_size, size_t backlo
 		expected_backlog,
 		learning_rate
 	};
+	pthread_mutex_lock(&node->mutex);
+	node->back_ready = 1;
 	if (node->prev->next != node){
-		pthread_mutex_lock(&node->mutex);
-		node->back_ready = 1;
 		pthread_cond_broadcast(&node->cond);
 		if (node->loop_start){
 			node->unrolled = 1;
@@ -2485,6 +2657,7 @@ void back_transfer_logic(neuromorph_node* node, size_t batch_size, size_t backlo
 		pthread_mutex_unlock(&node->mutex);
 		pthread_exit(NULL);
 	}
+	pthread_mutex_unlock(&node->mutex);
 	neuromorph_branch_back((void*)(&new_args));
 }
 
@@ -2514,18 +2687,22 @@ void* neuromorph_branch_back(void* args){
 		for (size_t i = 0;i<node->additional_branch_count;++i){
 			neuromorph_node* branch = node->additional_branches[i];
 			pthread_mutex_lock(&branch->mutex);
-			if (branch->loop){
+			if (branch->loop_start){
 				if (branch->unrolled){
-					memcpy(node->gradient_buffer, branch->gradient_buffer, sizeof(float)*branch->buffer_size);
+					memcpy(
+						node->gradient_buffer,
+						branch->gradient_buffer,
+						sizeof(float)*branch->buffer_size
+					);
 					branch->unrolled = 0;
 					pthread_mutex_unlock(&branch->mutex);
 					break;
 				}
+				pthread_mutex_unlock(&branch->mutex);
 				continue;
 			}
 			if (!branch->back_ready){
 				pthread_cond_wait(&branch->cond, &branch->mutex);
-				branch->back_ready = 0;
 			}
 			for (size_t k = 0;k<branch->buffer_size;++k){
 				node->gradient_buffer[k] += branch->gradient_buffer[k];
@@ -2535,16 +2712,14 @@ void* neuromorph_branch_back(void* args){
 		pthread_mutex_unlock(&node->mutex);
 		break;
 	case CONVERGENT_NODE:
-		node->convergence_function_derivative(*node->previous_gradient_buffer, node->previous_neuron_buffer, node->convergent_buffer, node->gradient_buffer, node->path_gradient_buffer, node->buffer_size);
-		pthread_mutex_lock(&node->convergent_node->mutex);
-		if (node->convergent_node->loop){
-			if (node->convergent_node->unrolled_front){
-				pthread_mutex_unlock(&node->convergent_node->mutex);
-				break;
-			}
-			node->convergent_node->unrolled_front = 1;
-		}
-		pthread_mutex_unlock(&node->convergent_node->mutex);
+		node->convergence_function_derivative(
+			*node->previous_gradient_buffer,
+			node->previous_neuron_buffer,
+			node->convergent_buffer,
+			node->gradient_buffer,
+			node->path_gradient_buffer,
+			node->buffer_size
+		);
 		pthread_t path_id;
 		backprop_args new_args = {
 			node->convergent_node,
@@ -2554,8 +2729,22 @@ void* neuromorph_branch_back(void* args){
 			expected_backlog,
 			learning_rate
 		};
+		pthread_mutex_lock(&node->convergent_node->mutex);
+		if (node->convergent_node->loop){
+			if (node->convergent_node->unrolled_front){
+				pthread_mutex_unlock(&node->convergent_node->mutex);
+				pthread_exit(NULL);
+				break;
+			}
+			node->convergent_node->unrolled_front = 1;
+			pthread_mutex_unlock(&node->convergent_node->mutex);
+			pthread_create(&path_id, NULL, neuromorph_branch_back, (void*)&new_args);
+			pthread_join(path_id, NULL);
+			break;
+		}
+		pthread_mutex_unlock(&node->convergent_node->mutex);
 		pthread_create(&path_id, NULL, neuromorph_branch_back, (void*)&new_args);
-		pthread_detach(path_id);
+		pthread_join(path_id, NULL);
 		break;
 	}
 	back_transfer_logic(node, batch_size, backlog_size, backlog, expected_backlog, learning_rate);
@@ -2567,8 +2756,16 @@ void neuromorph_train_batch(neuromorph* model, float* input, float* expected, ui
 	memcpy(model->batch_expected, expected, sizeof(float)*model->batch_size*model->output->buffer_size);
 	float losses = 0;
 	for (size_t pass = 0;pass<model->batch_size;++pass){
-		memcpy(model->input->neuron_buffer, input+(pass*model->input->buffer_size), sizeof(float)*model->input->buffer_size);
-		memcpy(model->output->expected, expected+(pass*model->output->buffer_size), sizeof(float)*model->output->buffer_size);
+		memcpy(
+			model->input->neuron_buffer,
+			input+(pass*model->input->buffer_size),
+			sizeof(float)*model->input->buffer_size
+		);
+		memcpy(
+			model->output->expected,
+			expected+(pass*model->output->buffer_size),
+			sizeof(float)*model->output->buffer_size
+		);
 		float loss = neuromorph_forward(model, pass);
 		switch (verbose){
 		default:
