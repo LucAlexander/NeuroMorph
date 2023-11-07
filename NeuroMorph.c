@@ -2761,14 +2761,203 @@ void neuromorph_train_batch(neuromorph* model, float* input, float* expected, ui
 		break;
 		}
 	}
-	if (verbose == 2){
+	if (verbose >= 2){
 		printf("Batch loss: %.2f\n", losses/model->batch_size);
 	}
 	neuromorph_back(model);
 }
 
-static PyObject* helloworld(PyObject* self, PyObject* args){
-	return Py_BuildValue("s", "Hello, World!");
+static PyObject* nm_compile(PyObject* self, PyObject* args){
+	const char* mdl;
+	uint16_t batch_size;
+	float learning_rate;
+	if (!PyArg_ParseTuple(args, "sIf", &mdl, &batch_size, &learning_rate)){
+		Py_RETURN_NONE;
+	}
+	neuromorph* model = neuromorph_compile(mdl, batch_size, learning_rate);
+	if (sizeof(uintptr_t) == sizeof(long)){
+		return Py_BuildValue("k", (uintptr_t)model);
+	}
+	else if (sizeof(uintptr_t) == sizeof(long long)){
+		return Py_BuildValue("K", (uintptr_t)model);
+	}
+	fprintf(stderr, "Unsupported sizeof uintptr_t\n");
+	Py_RETURN_NONE;
+}
+
+static PyObject* nm_build(PyObject* self, PyObject* args){
+	uintptr_t id;
+	if (sizeof(uintptr_t) == sizeof(long)){
+		if (!PyArg_ParseTuple(args,"k", &id)){
+			fprintf(stderr, "invalid model passed\n");
+			Py_RETURN_NONE;
+		}
+	}
+	else{
+		if (!PyArg_ParseTuple(args,"K", &id)){
+			fprintf(stderr, "invalid model passed\n");
+			Py_RETURN_NONE;
+		}
+	}
+	neuromorph* model = (neuromorph*)id;
+	neuromorph_build(model);
+	if (sizeof(uintptr_t) == sizeof(long)){
+		return Py_BuildValue("k", (uintptr_t)model);
+	}
+	if (sizeof(uintptr_t) == sizeof(long long)){
+		return Py_BuildValue("K", (uintptr_t)model);
+	}
+	fprintf(stderr, "Unsupported sizeof uintptr_t\n");
+	Py_RETURN_NONE;
+}
+
+uint8_t nm_fill_vector(float* v, size_t middle_size, size_t inner_size, PyObject* batch){
+	for (size_t k = 0;k<middle_size;++k){
+		PyObject* inner_list = PyList_GetItem(batch, k);
+		if (!PyList_Check(inner_list)){
+			fprintf(stderr, "non list encountered in batch\n");
+			return 0;
+		}
+		for (size_t j = 0;j<inner_size;++j){
+			PyObject* scalar = PyList_GetItem(inner_list, j);
+			if (!PyFloat_Check(scalar)){
+				fprintf(stderr, "Non float encountered in vector\n");
+				return 0;
+			}
+			v[(k*inner_size)+j] = (float)PyFloat_AsDouble(scalar);
+		}
+	}
+	return 1;
+}
+
+static PyObject* nm_train(PyObject* self, PyObject* args){
+	uintptr_t id;
+	uint16_t verbosity;
+	PyObject* intptr = PyTuple_GetItem(args, 0);
+	PyObject* input = PyTuple_GetItem(args, 1);
+	PyObject* expected = PyTuple_GetItem(args, 2);
+	PyObject* int16 = PyTuple_GetItem(args, 3);
+	if (sizeof(uintptr_t) == sizeof(long) && (!intptr || !(id = PyLong_AsUnsignedLong(intptr)))){
+		fprintf(stderr, "Unable to parse model in train\n");
+		Py_RETURN_NONE;
+	}
+	if (sizeof(uintptr_t) == sizeof(long long) && (!intptr || !(id = PyLong_AsUnsignedLongLong(intptr)))){
+		fprintf(stderr, "Unable to parse model in train\n");
+		Py_RETURN_NONE;
+	}
+	if (!int16 || !(verbosity = PyLong_AsUnsignedLong(int16))){
+		fprintf(stderr, "Unable to parse verbisity in train\n");
+		Py_RETURN_NONE;
+	}
+	if (!PyList_Check(input) || !PyList_Check(expected)){
+		fprintf(stderr, "Expected list\n");
+		Py_RETURN_NONE;
+	}
+	size_t input_outer_size = PyList_Size(input);
+	size_t expected_outer_size = PyList_Size(input);
+	if (!PyList_Check(PyList_GetItem(input, 0)) || !PyList_Check(PyList_GetItem(expected, 0))){
+		fprintf(stderr, "Expected batch, found other type\n");
+		Py_RETURN_NONE;
+	}
+	size_t input_middle_size = PyList_Size(PyList_GetItem(input, 0));
+	size_t expected_middle_size = PyList_Size(PyList_GetItem(input, 0));
+	if (
+		!PyList_Check(PyList_GetItem(PyList_GetItem(input, 0), 0)) ||
+		!PyList_Check(PyList_GetItem(PyList_GetItem(expected, 0), 0))
+	){
+		fprintf(stderr, "Expected vector, found other type\n");
+		Py_RETURN_NONE;
+	}
+	size_t input_inner_size = PyList_Size(PyList_GetItem(PyList_GetItem(input, 0), 0));
+	size_t expected_inner_size = PyList_Size(PyList_GetItem(PyList_GetItem(expected, 0), 0));
+	neuromorph* model = (neuromorph*)id;
+	if (model->input->buffer_size != input_inner_size){
+		fprintf(stderr, "Input vector size %lu does not match model input vector size %lu\n",
+			input_inner_size, model->input->buffer_size
+		);
+		Py_RETURN_NONE;
+	}
+	if (model->output->buffer_size != expected_inner_size){
+		fprintf(stderr, "Expected vector size %lu does not match model output vector size %lu\n",
+			expected_inner_size, model->output->buffer_size
+		);
+		Py_RETURN_NONE;
+	}
+	if (input_outer_size != expected_outer_size){
+		fprintf(stderr, "Input batch count does not match Expected batch count: %lu != %lu\n",
+			input_outer_size, expected_outer_size
+		);
+		Py_RETURN_NONE;
+	}
+	if (input_middle_size != expected_middle_size || input_middle_size != model->batch_size){
+		fprintf(stderr, "Batches dont match model batch size: %u\n", model->batch_size);
+		Py_RETURN_NONE;
+	}
+	float* intermediate_input = malloc(sizeof(float)*model->batch_size*model->input->buffer_size);
+	float* intermediate_expected = malloc(sizeof(float)*model->batch_size*model->output->buffer_size);
+	for (size_t i = 0;i<input_outer_size;++i){
+		PyObject* input_mid_list = PyList_GetItem(input, i);
+		PyObject* expected_mid_list = PyList_GetItem(expected, i);
+		if (!PyList_Check(input_mid_list) || !PyList_Check(expected_mid_list)){
+			fprintf(stderr, "non list encountered in batch list\n");
+			break;
+		}
+		if (
+			!nm_fill_vector(
+				intermediate_input,
+				input_middle_size,
+				input_inner_size,
+				input_mid_list
+			) ||
+			!nm_fill_vector(
+				intermediate_expected,
+				expected_middle_size,
+				expected_inner_size,
+				expected_mid_list
+			)
+		){
+			break;
+		}
+		neuromorph_train_batch(model, intermediate_input, intermediate_expected, verbosity);
+	}
+	free(intermediate_input);
+	free(intermediate_expected);
+	if (sizeof(uintptr_t) == sizeof(long)){
+		return Py_BuildValue("k", (uintptr_t)model);
+	}
+	if (sizeof(uintptr_t) == sizeof(long long)){
+		return Py_BuildValue("K", (uintptr_t)model);
+	}
+	fprintf(stderr, "Unsupported sizeof uintptr_t\n");
+	return NULL;
+}
+
+static PyObject* nm_seed(PyObject* self, PyObject* args){
+	time_t sd;
+	if (!PyArg_ParseTuple(args, "K", &sd)){
+		Py_RETURN_NONE;
+	}
+	set_seed(sd);
+	Py_RETURN_NONE;
+}
+
+static PyObject* nm_release(PyObject* self, PyObject* args){
+	uintptr_t id;
+	if (sizeof(uintptr_t) == sizeof(long)){
+		if (!PyArg_ParseTuple(args,"k", &id)){
+			fprintf(stderr, "invalid model passed\n");
+			Py_RETURN_NONE;
+		}
+	}
+	else{
+		if (!PyArg_ParseTuple(args,"K", &id)){
+			fprintf(stderr, "invalid model passed\n");
+			Py_RETURN_NONE;
+		}
+	}
+	neuromorph* model = (neuromorph*)id;
+	neuromorph_free(model);
+	Py_RETURN_NONE;
 }
 
 static PyObject* say_hello(PyObject* self, PyObject* args){
@@ -2792,8 +2981,12 @@ static PyObject* say_hello(PyObject* self, PyObject* args){
 }
 
 static PyMethodDef NeuroMorph[] = {
-	{"helloworld",(PyCFunction)helloworld,METH_NOARGS, "Prints Hello, World!"},
-	{"say_hello",(PyCFunction)say_hello,METH_VARARGS, "Greets the given argument"},
+	{"say_hello",(PyCFunction)say_hello,METH_VARARGS, "Test function, given MDL compiles, builds, runs single arbitrary random test batch, frees memory"},
+	{"compile",(PyCFunction)nm_compile,METH_VARARGS, "Compiles a model from MDL"},
+	{"build",(PyCFunction)nm_build,METH_VARARGS, "Builds a compiled model"},
+	{"train",(PyCFunction)nm_train,METH_VARARGS, "Trains the model on the given batches input and expected values"},
+	{"seed",(PyCFunction)nm_seed,METH_VARARGS, "Sets seed for learnable parameter initialization"},
+	{"release",(PyCFunction)nm_release,METH_VARARGS, "Releases memory related to model"},
 	{NULL,NULL,0,NULL}
 };
 
