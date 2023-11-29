@@ -2737,7 +2737,7 @@ void* neuromorph_branch_back(void* args){
 	return 0;
 }
 
-void neuromorph_train_batch(neuromorph* model, float* input, float* expected, uint8_t verbose){
+float neuromorph_train_batch(neuromorph* model, float* input, float* expected, uint8_t verbose){
 	memcpy(model->batch_expected, expected, sizeof(float)*model->batch_size*model->output->buffer_size);
 	float losses = 0;
 	for (size_t pass = 0;pass<model->batch_size;++pass){
@@ -2765,6 +2765,7 @@ void neuromorph_train_batch(neuromorph* model, float* input, float* expected, ui
 		printf("Batch loss: %.2f\n", losses/model->batch_size);
 	}
 	neuromorph_back(model);
+	return losses/model->batch_size;
 }
 
 static PyObject* nm_compile(PyObject* self, PyObject* args){
@@ -2895,7 +2896,9 @@ static PyObject* nm_train(PyObject* self, PyObject* args){
 	}
 	float* intermediate_input = malloc(sizeof(float)*model->batch_size*model->input->buffer_size);
 	float* intermediate_expected = malloc(sizeof(float)*model->batch_size*model->output->buffer_size);
-	for (size_t i = 0;i<input_outer_size;++i){
+	float cum_loss = 0;
+	size_t i = 1;
+	for (i = 0;i<input_outer_size;++i){
 		PyObject* input_mid_list = PyList_GetItem(input, i);
 		PyObject* expected_mid_list = PyList_GetItem(expected, i);
 		if (!PyList_Check(input_mid_list) || !PyList_Check(expected_mid_list)){
@@ -2918,18 +2921,11 @@ static PyObject* nm_train(PyObject* self, PyObject* args){
 		){
 			break;
 		}
-		neuromorph_train_batch(model, intermediate_input, intermediate_expected, verbosity);
+		cum_loss += neuromorph_train_batch(model, intermediate_input, intermediate_expected, verbosity);
 	}
 	free(intermediate_input);
 	free(intermediate_expected);
-	if (sizeof(uintptr_t) == sizeof(long)){
-		return Py_BuildValue("k", (uintptr_t)model);
-	}
-	if (sizeof(uintptr_t) == sizeof(long long)){
-		return Py_BuildValue("K", (uintptr_t)model);
-	}
-	fprintf(stderr, "Unsupported sizeof uintptr_t\n");
-	return NULL;
+	return Py_BuildValue("f", cum_loss/i);
 }
 
 static PyObject* nm_seed(PyObject* self, PyObject* args){
@@ -2970,7 +2966,7 @@ static PyObject* say_hello(PyObject* self, PyObject* args){
 	printf("compiled and built model:\n%s\n\n Running batch test\n\n", description);
 	float* input = malloc(sizeof(float)*5*model->input->buffer_size);
 	float* expected = malloc(sizeof(float)*5*model->output->buffer_size);
-	neuromorph_train_batch(model, input, expected, 2);
+	float lll = neuromorph_train_batch(model, input, expected, 2);
 	free(input);
 	free(expected);
 	neuromorph_free(model);

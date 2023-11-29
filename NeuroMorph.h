@@ -344,7 +344,7 @@ void* neuromorph_branch_back(void* args);
 void update_learnables(neuromorph_node* node, size_t batch_size, float learning_rate, float* weight_gradients);
 void gradient_propogate_end(neuromorph_node* node, size_t backlog_size, size_t batch_size, float* backlog, float* expected_backlog, float learning_rate);
 void gradient_propogate(neuromorph_node* node, size_t backlog_size, size_t batch_size, float* backlog, float learning_rate);
-void neuromorph_train_batch(neuromorph* model, float* input, float* expected, uint8_t verbose);
+float neuromorph_train_batch(neuromorph* model, float* input, float* expected, uint8_t verbose);
 void back_transfer_logic(neuromorph_node* node, size_t batch_size, size_t backlog_size, float* backlog, float* expected_backlog, float learning_rate);
 void aggregate_diverged_gradients(neuromorph_node* node);
 void construct_base_gradients_layer(neuromorph_node* node, float* base_gradients);
